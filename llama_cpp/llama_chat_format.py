@@ -3968,7 +3968,7 @@ def chatml_function_calling(
                             },
                         }
                         for i, (tool_name, completion) in enumerate(
-                            zip(completions_tool_name, completions, strict=True)
+                            zip(completions_tool_name, completions)
                         )
                     ],
                 },
