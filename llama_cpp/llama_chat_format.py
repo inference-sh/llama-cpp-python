@@ -3948,7 +3948,9 @@ def chatml_function_calling(
             {
                 "finish_reason": "tool_calls",
                 "index": 0,
-                "logprobs": completion["choices"][0]["logprobs"],
+                "logprobs": _convert_text_completion_logprobs_to_chat(
+                    completion["choices"][0]["logprobs"]
+                ),
                 "message": {
                     "role": "assistant",
                     "content": None,
