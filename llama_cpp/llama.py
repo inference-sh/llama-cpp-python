@@ -299,64 +299,8 @@ class Llama:
             ].key = b"\0"  # ensure sentinel element is zeroed
             self.model_params.kv_overrides = self._kv_overrides_array
 
-        self.n_batch = min(n_ctx, n_batch)  # ???
-        self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
-        self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
-
         # Used by the sampler
         self._seed = seed or llama_cpp.LLAMA_DEFAULT_SEED
-
-        # Context Params
-        self.context_params = llama_cpp.llama_context_default_params()
-        self.context_params.n_ctx = n_ctx
-        self.context_params.n_batch = self.n_batch
-        self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
-        self.context_params.n_threads = self.n_threads
-        self.context_params.n_threads_batch = self.n_threads_batch
-        self.context_params.rope_scaling_type = (
-            rope_scaling_type
-            if rope_scaling_type is not None
-            else llama_cpp.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED
-        )
-        self.context_params.pooling_type = pooling_type
-        self.context_params.rope_freq_base = (
-            rope_freq_base if rope_freq_base != 0.0 else 0
-        )
-        self.context_params.rope_freq_scale = (
-            rope_freq_scale if rope_freq_scale != 0.0 else 0
-        )
-        self.context_params.yarn_ext_factor = (
-            yarn_ext_factor if yarn_ext_factor != 0.0 else 0
-        )
-        self.context_params.yarn_attn_factor = (
-            yarn_attn_factor if yarn_attn_factor != 0.0 else 0
-        )
-        self.context_params.yarn_beta_fast = (
-            yarn_beta_fast if yarn_beta_fast != 0.0 else 0
-        )
-        self.context_params.yarn_beta_slow = (
-            yarn_beta_slow if yarn_beta_slow != 0.0 else 0
-        )
-        self.context_params.yarn_orig_ctx = yarn_orig_ctx if yarn_orig_ctx != 0 else 0
-        self._logits_all = logits_all if draft_model is None else True
-        self.context_params.embeddings = embedding  # TODO: Rename to embeddings
-        self.context_params.offload_kqv = offload_kqv
-        self.context_params.flash_attn = flash_attn
-
-        if op_offload is not None:
-            self.context_params.op_offload = op_offload
-
-        if swa_full is not None:
-            self.context_params.swa_full = swa_full
-
-        #  KV cache quantization
-        if type_k is not None:
-            self.context_params.type_k = type_k
-        if type_v is not None:
-            self.context_params.type_v = type_v
-        # Sampling Params
-        self.context_params.no_perf = no_perf
-        self.last_n_tokens_size = last_n_tokens_size
 
         self.cache: Optional[BaseLlamaCache] = None
 
@@ -378,39 +322,45 @@ class Llama:
                 )
             )
         )
-
-        # Override tokenizer
+        
+        self.draft_model = draft_model
+        
+           # Override tokenizer
         self.tokenizer_ = tokenizer or LlamaTokenizer(self)
+        
+        self._n_vocab = self.n_vocab()
 
-        # Set the default value for the context and correct the batch
-        if n_ctx == 0:
-            n_ctx = self._model.n_ctx_train()
-            self.n_batch = min(n_ctx, n_batch)
-            self.context_params.n_ctx = self._model.n_ctx_train()
-            self.context_params.n_batch = self.n_batch
-            self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
+        self._token_nl = self.token_nl()
+        self._token_eos = self.token_eos()
 
-        self._ctx = self._stack.enter_context(
-            contextlib.closing(
-                internals.LlamaContext(
-                    model=self._model,
-                    params=self.context_params,
-                    verbose=self.verbose,
-                )
-            )
+        self._candidates = internals.LlamaTokenDataArray(n_vocab=self._n_vocab)
+        # Context Params
+        self._create_context(
+            n_ctx=n_ctx,
+            n_batch=n_batch,
+            n_ubatch=min(n_batch, n_ubatch),
+            n_threads=n_threads,
+            n_threads_batch=n_threads_batch,
+            rope_scaling_type=rope_scaling_type,
+            pooling_type=pooling_type,
+            rope_freq_base=rope_freq_base,
+            rope_freq_scale=rope_freq_scale,
+            yarn_ext_factor=yarn_ext_factor,
+            yarn_attn_factor=yarn_attn_factor,
+            yarn_beta_fast=yarn_beta_fast,
+            yarn_beta_slow=yarn_beta_slow,
+            yarn_orig_ctx=yarn_orig_ctx,
+            logits_all=logits_all,
+            embedding=embedding,
+            offload_kqv=offload_kqv,
+            flash_attn=flash_attn,
+            no_perf=no_perf,
+            last_n_tokens_size=last_n_tokens_size,
+            type_k=type_k,
+            type_v=type_v,
         )
 
-        self._batch = self._stack.enter_context(
-            contextlib.closing(
-                internals.LlamaBatch(
-                    n_tokens=self.n_batch,
-                    embd=0,
-                    n_seq_max=self.context_params.n_ctx,
-                    verbose=self.verbose,
-                )
-            )
-        )
-
+    
         self._lora_adapter: Optional[llama_cpp.llama_adapter_lora_p] = None
 
         if self.lora_path:
@@ -446,22 +396,6 @@ class Llama:
         self._chat_handlers: Dict[
             str, llama_chat_format.LlamaChatCompletionHandler
         ] = {}
-
-        self.draft_model = draft_model
-
-        self._n_vocab = self.n_vocab()
-        self._n_ctx = self.n_ctx()
-
-        self._token_nl = self.token_nl()
-        self._token_eos = self.token_eos()
-
-        self._candidates = internals.LlamaTokenDataArray(n_vocab=self._n_vocab)
-
-        self.n_tokens = 0
-        self.input_ids: npt.NDArray[np.intc] = np.ndarray((n_ctx,), dtype=np.intc)
-        self.scores: npt.NDArray[np.single] = np.ndarray(
-            (n_ctx if logits_all == True else n_batch, self._n_vocab), dtype=np.single
-        )
 
         self._mirostat_mu = ctypes.c_float(
             2.0 * 5.0
@@ -2363,6 +2297,262 @@ class Llama:
             **kwargs,
         )
 
+    def _create_context(
+        self,
+        *,
+        n_ctx: int = 512,
+        n_batch: int = 512,
+        n_ubatch: int = 512,
+        n_threads: Optional[int] = None,
+        n_threads_batch: Optional[int] = None,
+        rope_scaling_type: Optional[
+            int
+        ] = llama_cpp.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
+        pooling_type: int = llama_cpp.LLAMA_POOLING_TYPE_UNSPECIFIED,
+        rope_freq_base: float = 0.0,
+        rope_freq_scale: float = 0.0,
+        yarn_ext_factor: float = -1.0,
+        yarn_attn_factor: float = 1.0,
+        yarn_beta_fast: float = 32.0,
+        yarn_beta_slow: float = 1.0,
+        yarn_orig_ctx: int = 0,
+        logits_all: bool = False,
+        embedding: bool = False,
+        offload_kqv: bool = True,
+        flash_attn: bool = False,
+        # Sampling Params
+        no_perf: bool = False,
+        last_n_tokens_size: int = 64,
+        type_k: Optional[int] = None,
+        type_v: Optional[int] = None,
+        state: Optional[LlamaState] = None,
+    ) -> None:
+        """Free the existing context and create a new one with specified parameters.
+        
+        Args:
+            n_ctx: Text context size. If 0, value from model is used.
+            n_batch: Maximum batch size for llama_decode.
+            n_ubatch: Maximum physical batch size.
+            n_seq_max: Maximum number of sequences (distinct states for recurrent models).
+            n_threads: Number of threads to use for generation.
+            n_threads_batch: Number of threads to use for batch processing.
+            rope_scaling_type: RoPE scaling type from llama_rope_scaling_type enum.
+            pooling_type: Whether to pool embedding results by sequence id.
+            attention_type: Attention type to use for embeddings.
+            rope_freq_base: RoPE base frequency, 0 = from model.
+            rope_freq_scale: RoPE frequency scaling factor, 0 = from model.
+            yarn_ext_factor: YaRN extrapolation mix factor, negative = from model.
+            yarn_attn_factor: YaRN magnitude scaling factor.
+            yarn_beta_fast: YaRN low correction dim.
+            yarn_beta_slow: YaRN high correction dim.
+            yarn_orig_ctx: YaRN original context size.
+            defrag_thold: Defragment KV cache if holes/size > thold, < 0 disabled.
+            type_k: Data type for K cache.
+            type_v: Data type for V cache.
+            logits_all: Compute all logits in llama_decode (deprecated).
+            embeddings: Extract embeddings with logits.
+            offload_kqv: Offload KQV ops (including KV cache) to GPU.
+            flash_attn: Use flash attention.
+            no_perf: Disable performance timings.
+            last_n_tokens_size: Size of the last n tokens.
+            type_k: Data type for K cache.
+            type_v: Data type for V cache.
+        """
+        # Create new context params with provided values
+        self.n_batch = min(n_ctx, n_batch)  # ???
+        self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
+        self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
+
+        # Context Params
+        self.context_params = llama_cpp.llama_context_default_params()
+        self.context_params.n_ctx = n_ctx
+        self.context_params.n_batch = self.n_batch
+        self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
+        self.context_params.n_threads = self.n_threads
+        self.context_params.n_threads_batch = self.n_threads_batch
+        self.context_params.rope_scaling_type = (
+            rope_scaling_type
+            if rope_scaling_type is not None
+            else llama_cpp.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED
+        )
+        self.context_params.pooling_type = pooling_type
+        self.context_params.rope_freq_base = (
+            rope_freq_base if rope_freq_base != 0.0 else 0
+        )
+        self.context_params.rope_freq_scale = (
+            rope_freq_scale if rope_freq_scale != 0.0 else 0
+        )
+        self.context_params.yarn_ext_factor = (
+            yarn_ext_factor if yarn_ext_factor != 0.0 else 0
+        )
+        self.context_params.yarn_attn_factor = (
+            yarn_attn_factor if yarn_attn_factor != 0.0 else 0
+        )
+        self.context_params.yarn_beta_fast = (
+            yarn_beta_fast if yarn_beta_fast != 0.0 else 0
+        )
+        self.context_params.yarn_beta_slow = (
+            yarn_beta_slow if yarn_beta_slow != 0.0 else 0
+        )
+        self.context_params.yarn_orig_ctx = yarn_orig_ctx if yarn_orig_ctx != 0 else 0
+        self.context_params.logits_all = (
+            logits_all if self.draft_model is None else True
+        )  # Must be set to True for speculative decoding
+        self.context_params.embeddings = embedding  # TODO: Rename to embeddings
+        self.context_params.offload_kqv = offload_kqv
+        self.context_params.flash_attn = flash_attn
+        #  KV cache quantization
+        if type_k is not None:
+            self.context_params.type_k = type_k
+        if type_v is not None:
+            self.context_params.type_v = type_v
+        
+        self.context_params.no_perf = no_perf
+        self.last_n_tokens_size = last_n_tokens_size
+        
+         # Set the default value for the context and correct the batch
+        if n_ctx == 0:
+            n_ctx = self._model.n_ctx_train()
+            self.n_batch = min(n_ctx, n_batch)
+            self.context_params.n_ctx = self._model.n_ctx_train()
+            self.context_params.n_batch = self.n_batch
+            self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
+
+        self._ctx = self._stack.enter_context(
+            contextlib.closing(
+                internals.LlamaContext(
+                    model=self._model,
+                    params=self.context_params,
+                    verbose=self.verbose,
+                )
+            )
+        )
+        
+        if state is not None:
+            self.load_state(state)
+        
+        self._n_ctx = self.n_ctx()
+        self.n_tokens = 0
+        
+        self.input_ids: npt.NDArray[np.intc] = np.ndarray((n_ctx,), dtype=np.intc)
+        self.scores: npt.NDArray[np.single] = np.ndarray(
+            (n_ctx if logits_all == True else n_batch, self._n_vocab), dtype=np.single
+        )
+        
+        self._batch = self._stack.enter_context(
+            contextlib.closing(
+                internals.LlamaBatch(
+                    n_tokens=self.n_batch,
+                    embd=0,
+                    n_seq_max=self.context_params.n_ctx,
+                    verbose=self.verbose,
+                )
+            )
+        )
+        
+
+        
+        if self._ctx is None:
+            raise RuntimeError("Failed to create new context")
+
+    def recreate_context(
+        self,
+        *,
+        n_ctx: int = 512,
+        n_batch: int = 512,
+        n_ubatch: int = 512,
+        n_threads: Optional[int] = None,
+        n_threads_batch: Optional[int] = None,
+        rope_scaling_type: Optional[
+            int
+        ] = llama_cpp.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
+        pooling_type: int = llama_cpp.LLAMA_POOLING_TYPE_UNSPECIFIED,
+        rope_freq_base: float = 0.0,
+        rope_freq_scale: float = 0.0,
+        yarn_ext_factor: float = -1.0,
+        yarn_attn_factor: float = 1.0,
+        yarn_beta_fast: float = 32.0,
+        yarn_beta_slow: float = 1.0,
+        yarn_orig_ctx: int = 0,
+        logits_all: bool = False,
+        embedding: bool = False,
+        offload_kqv: bool = True,
+        flash_attn: bool = False,
+        # Sampling Params
+        no_perf: bool = False,
+        last_n_tokens_size: int = 64,
+        type_k: Optional[int] = None,
+        type_v: Optional[int] = None,
+    ) -> None:
+        """Free the existing context and create a new one with specified parameters.
+        
+        Args:
+            n_ctx: Text context size. If 0, value from model is used.
+            n_batch: Maximum batch size for llama_decode.
+            n_ubatch: Maximum physical batch size.
+            n_seq_max: Maximum number of sequences (distinct states for recurrent models).
+            n_threads: Number of threads to use for generation.
+            n_threads_batch: Number of threads to use for batch processing.
+            rope_scaling_type: RoPE scaling type from llama_rope_scaling_type enum.
+            pooling_type: Whether to pool embedding results by sequence id.
+            attention_type: Attention type to use for embeddings.
+            rope_freq_base: RoPE base frequency, 0 = from model.
+            rope_freq_scale: RoPE frequency scaling factor, 0 = from model.
+            yarn_ext_factor: YaRN extrapolation mix factor, negative = from model.
+            yarn_attn_factor: YaRN magnitude scaling factor.
+            yarn_beta_fast: YaRN low correction dim.
+            yarn_beta_slow: YaRN high correction dim.
+            yarn_orig_ctx: YaRN original context size.
+            defrag_thold: Defragment KV cache if holes/size > thold, < 0 disabled.
+            type_k: Data type for K cache.
+            type_v: Data type for V cache.
+            logits_all: Compute all logits in llama_decode (deprecated).
+            embeddings: Extract embeddings with logits.
+            offload_kqv: Offload KQV ops (including KV cache) to GPU.
+            flash_attn: Use flash attention.
+            no_perf: Disable performance timings.
+            last_n_tokens_size: Size of the last n tokens.
+            type_k: Data type for K cache.
+            type_v: Data type for V cache.
+        """
+        
+        current_state = self.save_state()
+        
+        if self._ctx is not None:
+            self._ctx.close()
+            self._ctx = None
+            
+        # Free existing context if it exists
+        self._create_context(
+            n_ctx=n_ctx,
+            n_batch=n_batch,
+            n_ubatch=min(n_batch, n_ubatch),
+            n_threads=n_threads,
+            n_threads_batch=n_threads_batch,
+            rope_scaling_type=rope_scaling_type,
+            pooling_type=pooling_type,
+            rope_freq_base=rope_freq_base,
+            rope_freq_scale=rope_freq_scale,
+            yarn_ext_factor=yarn_ext_factor,
+            yarn_attn_factor=yarn_attn_factor,
+            yarn_beta_fast=yarn_beta_fast,
+            yarn_beta_slow=yarn_beta_slow,
+            yarn_orig_ctx=yarn_orig_ctx,
+            logits_all=logits_all,
+            embedding=embedding,
+            offload_kqv=offload_kqv,
+            flash_attn=flash_attn,
+            no_perf=no_perf,
+            last_n_tokens_size=last_n_tokens_size,
+            type_k=type_k,
+            type_v=type_v,
+            state=current_state,
+        )
+        
+        # Reapply any LoRA adapter if it exists
+        if self._lora_adapter is not None:
+            llama_cpp.llama_set_adapter_lora(self._ctx, self._lora_adapter, self.lora_scale)
+            
 
 class LlamaState:
     def __init__(
