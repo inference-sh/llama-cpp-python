@@ -350,6 +350,7 @@ def _convert_text_completion_chunks_to_chat(
                     "finish_reason": chunk["choices"][0]["finish_reason"],
                 }
             ],
+            "usage": chunk.get("usage") if "usage" in chunk else None,
         }
 
 
@@ -434,7 +435,7 @@ def _convert_completion_to_chat_function(
                     created = chunk["created"]
                     model = chunk["model"]
                     tool_id = "call_" + "_0_" + tool_name + "_" + chunk["id"]
-                    yield {
+                    response = {
                         "id": id_,
                         "object": "chat.completion.chunk",
                         "created": created,
@@ -453,7 +454,11 @@ def _convert_completion_to_chat_function(
                             }
                         ],
                     }
-                    yield {
+                    if "usage" in chunk:
+                        response["usage"] = chunk["usage"]
+                    yield response
+
+                    response = {
                         "id": "chat" + chunk["id"],
                         "object": "chat.completion.chunk",
                         "created": chunk["created"],
@@ -487,10 +492,14 @@ def _convert_completion_to_chat_function(
                             }
                         ],
                     }
+                    if "usage" in chunk:
+                        response["usage"] = chunk["usage"]
+                    yield response
                     first = False
                     continue
+
                 assert tool_id is not None
-                yield {
+                response = {
                     "id": "chat" + chunk["id"],
                     "object": "chat.completion.chunk",
                     "created": chunk["created"],
@@ -522,9 +531,12 @@ def _convert_completion_to_chat_function(
                         }
                     ],
                 }
+                if "usage" in chunk:
+                    response["usage"] = chunk["usage"]
+                yield response
 
             if id_ is not None and created is not None and model is not None:
-                yield {
+                response = {
                     "id": id_,
                     "object": "chat.completion.chunk",
                     "created": created,
@@ -543,6 +555,9 @@ def _convert_completion_to_chat_function(
                         }
                     ],
                 }
+                if "usage" in chunk:
+                    response["usage"] = chunk["usage"]
+                yield response
 
         return _stream_response_to_function_stream(chunks)
 
@@ -2123,6 +2138,7 @@ def functionary_v1_v2_chat_handler(
                                 },
                             }
                         ],
+                        usage=chunk["usage"] if "usage" in chunk else None,
                     )
                     first = False
                 if tools is not None:
@@ -2163,6 +2179,7 @@ def functionary_v1_v2_chat_handler(
                                 },
                             }
                         ],
+                        usage=chunk["usage"] if "usage" in chunk else None,
                     )
             # Yield tool_call/function_call stop message
             yield llama_types.CreateChatCompletionStreamResponse(
@@ -2185,6 +2202,7 @@ def functionary_v1_v2_chat_handler(
                         },
                     }
                 ],
+                usage=chunk["usage"] if "usage" in chunk else None,
             )
         # If "auto" or no tool_choice/function_call
         elif isinstance(function_call, str) and function_call == "auto":
@@ -2220,6 +2238,7 @@ def functionary_v1_v2_chat_handler(
                                 "finish_reason": None,
                             }
                         ],
+                        usage=chunk["usage"] if "usage" in chunk else None,
                     )
                 else:
                     prompt += f"{function_name}\n<|content|>"
@@ -2265,6 +2284,7 @@ def functionary_v1_v2_chat_handler(
                                 },
                             }
                         ],
+                        usage=chunk["usage"] if "usage" in chunk else None,
                     )
                 # Generate content
                 stops = [RECIPIENT_TOKEN, STOP_TOKEN]
@@ -2302,6 +2322,7 @@ def functionary_v1_v2_chat_handler(
                                                 },
                                             }
                                         ],
+                                        usage=chunk["usage"] if "usage" in chunk else None,
                                     )
                                 is_end = False
                         elif chunk["choices"][0]["text"] == "\n":
@@ -2331,6 +2352,7 @@ def functionary_v1_v2_chat_handler(
                                         },
                                     }
                                 ],
+                                usage=chunk["usage"] if "usage" in chunk else None,
                             )
                     # Check whether the model wants to generate another turn
                     if (
@@ -2363,6 +2385,7 @@ def functionary_v1_v2_chat_handler(
                                     "finish_reason": "stop",
                                 }
                             ],
+                            usage=chunk["usage"] if "usage" in chunk else None,
                         )
                         break
                 else:
@@ -2412,6 +2435,7 @@ def functionary_v1_v2_chat_handler(
                                         },
                                     }
                                 ],
+                                usage=chunk["usage"] if "usage" in chunk else None,
                             )
                     prompt += completion_text.strip()
                     grammar = None
@@ -2451,6 +2475,7 @@ def functionary_v1_v2_chat_handler(
                                     },
                                 }
                             ],
+                            usage=chunk["usage"] if "usage" in chunk else None,
                         )
                         break
 

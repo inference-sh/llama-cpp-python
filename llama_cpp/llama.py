@@ -1054,6 +1054,50 @@ class Llama:
         else:
             return output
 
+    def _create_chunk(
+        self,
+        completion_id: str,
+        created: int,
+        model_name: str,
+        text: str,
+        logprobs_or_none: Union[Optional[CompletionLogprobs], None],
+        index: int,
+        finish_reason: Union[str, None],
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> CreateCompletionStreamResponse:
+        """Create chunks for streaming API, depending on whether usage is requested or not."""
+        if usage is not None:
+            return {
+                "id": completion_id,
+                "object": "text_completion",
+                "created": created,
+                "model": model_name,
+                "choices": [
+                    {
+                        "text": text,
+                        "index": index,
+                        "logprobs": logprobs_or_none,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+                "usage": usage,
+            }
+        else:
+            return {
+                "id": completion_id,
+                "object": "text_completion",
+                "created": created,
+                "model": model_name,
+                "choices": [
+                    {
+                        "text": text,
+                        "index": index,
+                        "logprobs": logprobs_or_none,
+                        "finish_reason": finish_reason,
+                    }
+                ],
+            }
+
     def _create_completion(
         self,
         prompt: Union[str, List[int]],
@@ -1380,24 +1424,20 @@ class Llama:
                             "top_logprobs": [top_logprob],
                         }
                         returned_tokens += 1
-                        yield {
-                            "id": completion_id,
-                            "object": "text_completion",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [
-                                {
-                                    "text": self.detokenize(
-                                        [token],
-                                        prev_tokens=prompt_tokens
-                                        + completion_tokens[:returned_tokens],
-                                    ).decode("utf-8", errors="ignore"),
-                                    "index": 0,
-                                    "logprobs": logprobs_or_none,
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
+                        yield self._create_chunk(
+                            completion_id=completion_id,
+                            created=created,
+                            model_name=model_name,
+                            text=self.detokenize(
+                                [token],
+                                prev_tokens=prompt_tokens
+                                + completion_tokens[:returned_tokens],
+                            ).decode("utf-8", errors="ignore"),
+                            logprobs_or_none=logprobs_or_none,
+                            index=0,
+                            finish_reason=None,
+                            usage=None,
+                        )
                 else:
                     while len(remaining_tokens) > 0:
                         decode_success = False
@@ -1426,20 +1466,16 @@ class Llama:
                         remaining_tokens = remaining_tokens[i:]
                         returned_tokens += i
 
-                        yield {
-                            "id": completion_id,
-                            "object": "text_completion",
-                            "created": created,
-                            "model": model_name,
-                            "choices": [
-                                {
-                                    "text": ts,
-                                    "index": 0,
-                                    "logprobs": None,
-                                    "finish_reason": None,
-                                }
-                            ],
-                        }
+                        yield self._create_chunk(
+                            completion_id=completion_id,
+                            created=created,
+                            model_name=model_name,
+                            text=ts,
+                            logprobs_or_none=None,
+                            index=0,
+                            finish_reason=None,
+                            usage=None,
+                        )
 
             if len(completion_tokens) >= max_tokens:
                 text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
@@ -1518,54 +1554,51 @@ class Llama:
                     if token_end_position == end - 1:
                         break
                     returned_tokens += 1
-                    yield {
-                        "id": completion_id,
-                        "object": "text_completion",
-                        "created": created,
-                        "model": model_name,
-                        "choices": [
-                            {
-                                "text": last_text[
-                                    : len(last_text) - (token_end_position - end)
-                                ].decode("utf-8", errors="ignore"),
-                                "index": 0,
-                                "logprobs": logprobs_or_none,
-                                "finish_reason": None,
-                            }
-                        ],
-                    }
+                    yield self._create_chunk(
+                        completion_id=completion_id,
+                        created=created,
+                        model_name=model_name,
+                        text=last_text[
+                            : len(last_text) - (token_end_position - end)
+                        ].decode("utf-8", errors="ignore"),
+                        logprobs_or_none=logprobs_or_none,
+                        index=0,
+                        finish_reason=None,
+                        usage=None,
+                    )
                     break
                 returned_tokens += 1
-                yield {
-                    "id": completion_id,
-                    "object": "text_completion",
-                    "created": created,
-                    "model": model_name,
-                    "choices": [
-                        {
-                            "text": self.detokenize([token]).decode(
-                                "utf-8", errors="ignore"
-                            ),
-                            "index": 0,
-                            "logprobs": logprobs_or_none,
-                            "finish_reason": None,
-                        }
-                    ],
-                }
-            yield {
-                "id": completion_id,
-                "object": "text_completion",
-                "created": created,
-                "model": model_name,
-                "choices": [
-                    {
-                        "text": "",
-                        "index": 0,
-                        "logprobs": None,
-                        "finish_reason": finish_reason,
-                    }
-                ],
+                yield self._create_chunk(
+                    completion_id=completion_id,
+                    created=created,
+                    model_name=model_name,
+                    text=self.detokenize([token]).decode(
+                        "utf-8", errors="ignore"
+                    ),
+                    logprobs_or_none=logprobs_or_none,
+                    index=0,
+                    finish_reason=None,
+                    usage=None,
+                )
+
+            # Final streaming chunk with both finish_reason and usage
+            usage = {
+                "prompt_tokens": len(prompt_tokens),
+                "completion_tokens": returned_tokens,
+                "total_tokens": len(prompt_tokens) + returned_tokens,
             }
+
+            yield self._create_chunk(
+                completion_id=completion_id,
+                created=created,
+                model_name=model_name,
+                text="",
+                logprobs_or_none=None,
+                index=0,
+                finish_reason=finish_reason,
+                usage=usage,
+            )
+
             if self.cache:
                 if self.verbose:
                     print("Llama._create_completion: cache save", file=sys.stderr)
