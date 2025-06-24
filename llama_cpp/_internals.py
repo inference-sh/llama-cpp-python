@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import ctypes
+from enum import Enum
 
 from typing import (
     Dict,
@@ -26,7 +27,13 @@ import llama_cpp.llama_cpp as llama_cpp
 
 
 # Python wrappers over llama.h structs
-
+class LlamaBackendDev(Enum):
+    # CPU device using system memory
+    CPU = 0
+    # GPU device using dedicated memory  
+    GPU = 1
+    # accelerator devices intended to be used together with the CPU backend (e.g. BLAS or AMX)
+    ACCEL = 2
 
 class LlamaModel:
     """Intermediate Python wrapper for a llama.cpp llama_model.
@@ -95,7 +102,13 @@ class LlamaModel:
         return llama_cpp.llama_model_n_ctx_train(self.model)
 
     def n_embd(self) -> int:
-        return llama_cpp.llama_model_n_embd(self.model)
+        return llama_cpp.llama_n_embd(self.model)
+    
+    def n_layer(self) -> int:
+        return llama_cpp.llama_n_layer(self.model)
+    
+    def dev_layer(self, il: int) -> LlamaBackendDev:
+        return LlamaBackendDev(llama_cpp.llama_model_dev_layer(self.model, il))
 
     def rope_freq_scale_train(self) -> float:
         return llama_cpp.llama_model_rope_freq_scale_train(self.model)
