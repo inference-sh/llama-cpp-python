@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(llama_cpp)
 
 option(LLAMA_BUILD "Build llama.cpp shared library and install alongside python package" ON)
-option(LLAVA_BUILD "Build llava shared library and install alongside python package" ON)
+option(MTMD_BUILD "Build multimodal (mtmd) shared library and install alongside python package" ON)
 
 function(llama_cpp_python_install_target target)
     if(NOT TARGET ${target})
@@ -143,7 +143,7 @@ if (LLAMA_BUILD)
         )
     endif()
 
-    if (LLAVA_BUILD)
+    if (MTMD_BUILD)
         if (LLAMA_CUBLAS OR LLAMA_CUDA)
             add_compile_definitions(GGML_USE_CUBLAS)
             add_compile_definitions(GGML_USE_CUDA)
@@ -153,7 +153,7 @@ if (LLAMA_BUILD)
             add_compile_definitions(GGML_USE_METAL)
         endif()
 
-        # Building llava
+        # Building multimodal support using mtmd
         add_subdirectory(vendor/llama.cpp/tools/mtmd)
 
         if (WIN32)
