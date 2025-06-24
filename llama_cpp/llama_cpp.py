@@ -10,6 +10,7 @@ from typing import (
     NewType,
     Optional,
     TYPE_CHECKING,
+    List,
 )
 
 from llama_cpp._ctypes_extensions import (
@@ -653,6 +654,12 @@ class llama_model_kv_override(ctypes.Structure):
 #     const char * pattern;
 #     ggml_backend_buffer_type_t buft;
 # };
+
+class llama_model_tensor_buft_override(ctypes.Structure):
+    _fields_ = [
+        ("pattern", ctypes.c_char_p),
+        ("buft", ctypes.c_int),
+    ]
 
 
 # struct llama_model_params {
