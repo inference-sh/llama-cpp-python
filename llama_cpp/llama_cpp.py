@@ -1428,6 +1428,11 @@ def llama_model_n_embd(model: llama_model_p, /) -> int:
 def llama_model_n_layer(model: llama_model_p, /) -> int:
     ...
 
+# LLAMA_API int32_t llama_model_dev_layer  (const struct llama_model * model, int32_t il);
+@ctypes_function("llama_model_dev_layer", [llama_model_p_ctypes, ctypes.c_int32], ctypes.c_int32)
+def llama_model_dev_layer(model: llama_model_p, il: Union[ctypes.c_int32, int], /) -> int:
+    ...
+
 
 # LLAMA_API int32_t llama_model_n_head     (const struct llama_model * model);
 @ctypes_function("llama_model_n_head", [llama_model_p_ctypes], ctypes.c_int32)
