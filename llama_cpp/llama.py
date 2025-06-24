@@ -487,6 +487,13 @@ class Llama:
     @property
     def model(self) -> llama_cpp.llama_model_p:
         return self._model.model
+    
+    @property
+    def n_layer(self) -> int:
+        return self._model.n_layer()
+    
+    def dev_layer(self, il: int) -> internals.LlamaBackendDev:
+        return self._model.dev_layer(il)
 
     @property
     def _input_ids(self) -> npt.NDArray[np.intc]:
