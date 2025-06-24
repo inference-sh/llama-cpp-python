@@ -5,6 +5,8 @@ import os
 import ctypes
 import functools
 import pathlib
+import logging
+import traceback
 
 from typing import (
     Any,
@@ -18,6 +20,9 @@ from typing import (
 )
 from typing_extensions import TypeAlias
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("llama_cpp.binding")
 
 # Load the library
 def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
@@ -110,11 +115,21 @@ def ctypes_function_for_shared_library(lib: ctypes.CDLL):
     ):
         def decorator(f: F) -> F:
             if enabled:
+                print(f"Setting up binding for C function: {name}")  # Print when binding is created
                 func = getattr(lib, name)
                 func.argtypes = argtypes
                 func.restype = restype
-                functools.wraps(f)(func)
-                return func
+
+                @functools.wraps(f)
+                def wrapper(*args, **kwargs):
+                    print(f">>> Calling {name} with args: {args}")  # Print right before C call
+                    sys.stdout.flush()  # Force flush to ensure we see the output
+                    result = func(*args, **kwargs)
+                    print(f"<<< {name} returned successfully")  # Print after successful return
+                    sys.stdout.flush()
+                    return result
+
+                return wrapper
             else:
                 return f
 

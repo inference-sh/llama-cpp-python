@@ -798,7 +798,8 @@ class llama_model_params(ctypes.Structure):
 #                       // ref: https://github.com/ggml-org/llama.cpp/pull/14363
 # };
 class llama_context_params(ctypes.Structure):
-    """Parameters for llama_context
+    """Parameters for llama_context. NOTE: changing the default values of parameters marked as [EXPERIMENTAL] 
+    may cause crashes or incorrect results in certain configurations.
 
     Attributes:
         n_ctx (int): text context, 0 = from model
@@ -808,7 +809,7 @@ class llama_context_params(ctypes.Structure):
         n_threads (int): number of threads to use for generation
         n_threads_batch (int): number of threads to use for batch processing
         rope_scaling_type (int): RoPE scaling type, from `enum llama_rope_scaling_type`
-        pooling_type (int): whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
+        pooling_type (int): whether to pool (sum) embedding results by sequence id
         attention_type (int): attention type to use for embeddings
         rope_freq_base (float): RoPE base frequency, 0 = from model
         rope_freq_scale (float): RoPE frequency scaling factor, 0 = from model
