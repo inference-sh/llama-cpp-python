@@ -106,7 +106,7 @@ class LlamaModel:
     
     def n_layer(self) -> int:
         return llama_cpp.llama_n_layer(self.model)
-    
+
     def dev_layer(self, il: int) -> LlamaBackendDev:
         return LlamaBackendDev(llama_cpp.llama_model_dev_layer(self.model, il))
 
