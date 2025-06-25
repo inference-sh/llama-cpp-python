@@ -2716,7 +2716,7 @@ class Llava15ChatHandler:
         "{% endif %}"
     )
 
-    def __init__(self, clip_model_path: str, verbose: bool = True):
+    def __init__(self, clip_model_path: str, llama_model: llama.Llama, verbose: bool = True):
         import llama_cpp.mtmd_cpp as mtmd_cpp
 
         self.clip_model_path = clip_model_path
@@ -3630,62 +3630,59 @@ class Gemma3ChatHandler(Llava15ChatHandler):
         return split_text
 
     def eval_image(self, llama: llama.Llama, image_url: str):
-        import llama_cpp
+        image_bytes = self.load_image(image_url)
+        
+        # Create bitmap manager if not exists
+        if self._bitmap_manager is None:
+            self._bitmap_manager = self._mtmd_cpp.BitmapManager()
 
-        n_tokens = 256
-        if llama.n_tokens + n_tokens > llama.n_ctx():
-            raise ValueError(
-                f"Prompt exceeds n_ctx: {llama.n_tokens + n_tokens} > {llama.n_ctx()}"
-            )
+        # Create bitmap from bytes
+        if not self._bitmap_manager.add_from_memory(self.clip_ctx, image_bytes):
+            raise ValueError("Failed to create bitmap from image bytes")
 
-        img_bytes = self.load_image(image_url)
-        img_u8_p = self._mtmd_cpp.clip_image_u8_init()
-        if not self._mtmd_cpp.clip_image_load_from_bytes(
-            ctypes.create_string_buffer(img_bytes, len(img_bytes)),
-            ctypes.c_size_t(len(img_bytes)),
-            img_u8_p,
-        ):
-            self._mtmd_cpp.clip_image_u8_free(img_u8_p)
-            raise ValueError("Failed to load image.")
+        # Create input chunks for the bitmap
+        chunks = self._mtmd_cpp.mtmd_input_chunks_init()
+        if chunks is None:
+            raise ValueError("Failed to create input chunks")
 
-        img_f32_p = self._mtmd_cpp.clip_image_f32_batch_init()
-        if not self._mtmd_cpp.clip_image_preprocess(self.clip_ctx, img_u8_p, img_f32_p):
-            self._mtmd_cpp.clip_image_f32_batch_free(img_f32_p)
-            self._mtmd_cpp.clip_image_u8_free(img_u8_p)
-            raise ValueError("Failed to preprocess image.")
+        # Create input text with media marker
+        # Get media marker from context params
+        params = self._mtmd_cpp.mtmd_context_params_default()
+        text = self._mtmd_cpp.mtmd_input_text()
+        text.text = params.media_marker if params.media_marker else self._mtmd_cpp.mtmd_default_marker()
+        text.add_special = False
+        text.parse_special = True
 
-        n_embd = llama_cpp.llama_model_n_embd(llama._model.model)
-        embed = (ctypes.c_float * (n_tokens * n_embd))()
-        if not self._mtmd_cpp.clip_image_batch_encode(self.clip_ctx, llama.n_threads, img_f32_p, embed):
-            self._mtmd_cpp.clip_image_f32_batch_free(img_f32_p)
-            self._mtmd_cpp.clip_image_u8_free(img_u8_p)
-            raise ValueError("Failed to encode image.")
+        # Tokenize with bitmap
+        if self._mtmd_cpp.mtmd_tokenize(self.clip_ctx, chunks, text, self._bitmap_manager.c_ptr(), len(self._bitmap_manager.entries)) != 0:
+            self._mtmd_cpp.mtmd_input_chunks_free(chunks)
+            raise ValueError("Failed to tokenize image")
 
-        self._mtmd_cpp.clip_image_f32_batch_free(img_f32_p)
-        self._mtmd_cpp.clip_image_u8_free(img_u8_p)
-        llama_cpp.llama_set_causal_attn(llama.ctx, False)
+        # Get new n_past after evaluation
+        n_past = ctypes.c_int(llama.n_tokens)
+        n_past_p = ctypes.pointer(n_past)
 
-        seq_id_0 = (ctypes.c_int32 * 1)()
-        seq_ids = (ctypes.POINTER(ctypes.c_int32) * (n_tokens + 1))()
-        for i in range(n_tokens):
-            seq_ids[i] = seq_id_0
+        # Evaluate chunks
+        if self._mtmd_cpp.mtmd_helper_eval_chunks(
+            self.clip_ctx,
+            llama.ctx,
+            chunks,
+            llama.n_tokens,
+            0,  # seq_id
+            llama.n_batch,
+            True,  # logits_last
+            n_past_p
+        ) != 0:
+            self._mtmd_cpp.mtmd_input_chunks_free(chunks)
+            raise ValueError("Failed to evaluate chunks")
 
-        batch = llama_cpp.llama_batch()
-        batch.n_tokens = n_tokens
-        batch.token = None
-        batch.embd = embed
-        batch.pos = (ctypes.c_int32 * n_tokens)(*[i + llama.n_tokens for i in range(n_tokens)])
-        batch.seq_id = seq_ids
-        batch.n_seq_id = (ctypes.c_int32 * n_tokens)(*([1] * n_tokens))
-        batch.logits = (ctypes.c_int8 * n_tokens)()
+        # Update n_tokens
+        llama.input_ids[llama.n_tokens : n_past.value] = -1
+        llama.n_tokens = n_past.value
 
-        if llama_cpp.llama_decode(llama.ctx, batch):
-            raise ValueError("Failed to decode image.")
-
-        llama_cpp.llama_set_causal_attn(llama.ctx, True)
-        # Required to avoid issues with hf tokenizer
-        llama.input_ids[llama.n_tokens : llama.n_tokens + n_tokens] = -1
-        llama.n_tokens += n_tokens
+        # Cleanup
+        self._mtmd_cpp.mtmd_input_chunks_free(chunks)
+        self._bitmap_manager.clear()
 
 
 def _accumulate_chunks(
