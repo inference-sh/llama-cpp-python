@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import ctypes
 from ctypes import (
     c_bool,
     c_char_p,
     c_int,
+    c_int32,
     c_uint8,
     c_uint32,
     c_float,
@@ -17,6 +19,7 @@ from ctypes import (
 )
 import pathlib
 from typing import (
+    List,
     Union,
     NewType,
     Optional,
@@ -31,19 +34,161 @@ from llama_cpp._ctypes_extensions import (
 )
 
 if TYPE_CHECKING:
+    from llama_cpp.llama_types import (
+        llama_token,
+        llama_pos,
+    )
     from llama_cpp._ctypes_extensions import (
         CtypesArray,
+        CtypesPointer,
     )
 
+# Define input text structure
+class mtmd_input_text(Structure):
+    _fields_ = [
+        ("text", c_char_p),
+        ("add_special", c_bool),
+        ("parse_special", c_bool),
+    ]
 
-# Specify the base name of the shared library to load
+# Define context parameters structure
+class mtmd_context_params(Structure):
+    _fields_ = [
+        ("use_gpu", c_bool),
+        ("print_timings", c_bool),
+        ("n_threads", c_int),
+        ("verbosity", c_int),
+        ("image_marker", c_char_p),  # const char*
+        ("media_marker", c_char_p),  # const char*
+    ]
+
+# Define input chunk type enum
+mtmd_input_chunk_type = c_int
+(
+    MTMD_INPUT_CHUNK_TYPE_TEXT,
+    MTMD_INPUT_CHUNK_TYPE_IMAGE,
+    MTMD_INPUT_CHUNK_TYPE_AUDIO,
+) = (0, 1, 2)
+
+# Define slice template enum
+mtmd_slice_tmpl = c_int
+(
+    MTMD_SLICE_TMPL_NONE,
+    MTMD_SLICE_TMPL_MINICPMV_2_5,
+    MTMD_SLICE_TMPL_MINICPMV_2_6,
+    MTMD_SLICE_TMPL_LLAMA4,
+) = (0, 1, 2, 3)
+
+# Define whisper filters structure
+class whisper_filters(Structure):
+    _fields_ = [
+        ("n_mel", c_int),
+    ]
+
+# Define mtmd_context structure
+class mtmd_context(Structure):
+    _fields_ = [
+        ("ctx_v", c_void_p),  # clip_ctx*
+        ("ctx_a", c_void_p),  # clip_ctx*
+        ("text_model", c_void_p),  # const llama_model*
+        ("image_embd_v", POINTER(c_float)),  # std::vector<float>
+        ("print_timings", c_bool),
+        ("n_threads", c_int),
+        ("media_marker", c_char_p),  # std::string
+        ("n_embd_text", c_int),
+        ("img_beg", c_char_p),  # std::string
+        ("img_end", c_char_p),  # std::string
+        ("aud_beg", c_char_p),  # std::string
+        ("aud_end", c_char_p),  # std::string
+        ("slice_tmpl", c_int),  # mtmd_slice_tmpl
+        ("tok_ov_img_start", llama_cpp.llama_token),
+        ("tok_ov_img_end", llama_cpp.llama_token),
+        ("tok_slices_start", llama_cpp.llama_token),
+        ("tok_slices_end", llama_cpp.llama_token),
+        ("tok_sli_img_start", llama_cpp.llama_token),
+        ("tok_sli_img_end", llama_cpp.llama_token),
+        ("tok_sli_img_mid", llama_cpp.llama_token),
+        ("tok_row_end", llama_cpp.llama_token),
+        ("tok_row_end_trail", c_bool),
+        ("ov_img_first", c_bool),
+        ("use_mrope", c_bool),
+        ("w_filters", whisper_filters),
+    ]
+
+# Define bitmap structure
+class mtmd_bitmap(Structure):
+    _fields_ = [
+        ("nx", c_uint32),
+        ("ny", c_uint32),
+        ("data", POINTER(c_uint8)),  # Vector represented as pointer
+        ("id", c_char_p),
+        ("is_audio", c_bool),
+    ]
+
+# Define image tokens structure
+class mtmd_image_tokens(Structure):
+    _fields_ = [
+        ("nx", c_uint32),
+        ("ny", c_uint32),
+        ("use_mrope_pos", c_bool),
+        ("batch_f32", c_void_p),  # clip_image_f32_batch
+        ("id", c_char_p),
+    ]
+
+# Define audio tokens structure
+class mtmd_audio_tokens(Structure):
+    _fields_ = [
+        ("n_tokens", c_uint32),
+        ("batch_f32", c_void_p),  # clip_image_f32_batch
+        ("id", c_char_p),
+    ]
+
+# Define input chunk structure
+class mtmd_input_chunk(Structure):
+    _fields_ = [
+        ("type", mtmd_input_chunk_type),
+        ("tokens_text", POINTER(llama_cpp.llama_token)),  # Vector represented as pointer
+        ("tokens_image", c_void_p),  # mtmd_image_tokens_ptr
+        ("tokens_audio", c_void_p),  # mtmd_audio_tokens_ptr
+    ]
+
+# Define input chunks structure
+class mtmd_input_chunks(Structure):
+    _fields_ = [
+        ("entries", POINTER(mtmd_input_chunk)),  # Vector represented as pointer
+    ]
+
+# Define context pointer type
+mtmd_context_p = NewType("mtmd_context_p", int)
+mtmd_context_p_ctypes = c_void_p
+
+# Define bitmap pointer type
+mtmd_bitmap_p = NewType("mtmd_bitmap_p", int)
+mtmd_bitmap_p_ctypes = c_void_p
+
+# Define input chunks pointer type
+mtmd_input_chunks_p = NewType("mtmd_input_chunks_p", int)
+mtmd_input_chunks_p_ctypes = c_void_p
+
+# Define input chunk pointer type
+mtmd_input_chunk_p = NewType("mtmd_input_chunk_p", int)
+mtmd_input_chunk_p_ctypes = c_void_p
+
+# Define image tokens pointer type
+mtmd_image_tokens_p = NewType("mtmd_image_tokens_p", int)
+mtmd_image_tokens_p_ctypes = c_void_p
+
+# Define audio tokens pointer type
+mtmd_audio_tokens_p = NewType("mtmd_audio_tokens_p", int)
+mtmd_audio_tokens_p_ctypes = c_void_p
+
+# Load the library
 _libmtmd_base_name = "mtmd"
 _libmtmd_override_path = os.environ.get("MTMD_CPP_LIB")
 _libmtmd_base_path = pathlib.Path(os.path.abspath(os.path.dirname(__file__))) / "lib" if _libmtmd_override_path is None else pathlib.Path()
 
 # Load the library
 _libmtmd = load_shared_library(_libmtmd_base_name, _libmtmd_base_path)
-
 ctypes_function = ctypes_function_for_shared_library(_libmtmd)
 
 ################################################
