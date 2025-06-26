@@ -4167,9 +4167,9 @@ def gguf_function_calling(
     function_calling_template = None
     if hasattr(llama, 'model_path'):
         from llama_cpp.llama import Llama
-        metadata = Llama.get_metadata(llama.model_path)
-        if metadata and "tokenizer.chat.template" in metadata:
-            function_calling_template = metadata["tokenizer.chat.template"]
+        metadata = Llama.metadata
+        if metadata and "tokenizer.chat_template" in metadata:
+            function_calling_template = metadata["tokenizer.chat_template"]
 
 
     function_calling_template = (
