@@ -172,11 +172,11 @@ class ModelSettings(BaseSettings):
         description="Number of tokens to predict using the draft model.",
     )
     # KV Cache Quantization
-    type_k: Optional[int] = Field(
+    type_k: Optional[llama_cpp.GGMLType] = Field(
         default=None,
         description="Type of the key cache quantization.",
     )
-    type_v: Optional[int] = Field(
+    type_v: Optional[llama_cpp.GGMLType] = Field(
         default=None,
         description="Type of the value cache quantization.",
     )
