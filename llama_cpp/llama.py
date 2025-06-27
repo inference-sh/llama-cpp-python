@@ -39,6 +39,7 @@ from .llama_cache import (
     LlamaRAMCache,  # type: ignore
 )
 from .llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
+from .llama_cpp import GGMLType
 import llama_cpp.llama_cpp as llama_cpp
 import llama_cpp.llama_chat_format as llama_chat_format
 
@@ -111,8 +112,8 @@ class Llama:
         # Tokenizer Override
         tokenizer: Optional[BaseLlamaTokenizer] = None,
         # KV cache quantization
-        type_k: Optional[int] = None,
-        type_v: Optional[int] = None,
+        type_k: Optional[GGMLType] = None,
+        type_v: Optional[GGMLType] = None,
         # Misc
         spm_infill: bool = False,
         verbose: bool = True,
@@ -2363,8 +2364,8 @@ class Llama:
         # Sampling Params
         no_perf: bool = False,
         last_n_tokens_size: int = 64,
-        type_k: Optional[int] = None,
-        type_v: Optional[int] = None,
+        type_k: Optional[GGMLType] = None,
+        type_v: Optional[GGMLType] = None,
         state: Optional[LlamaState] = None,
     ) -> None:
         """Free the existing context and create a new one with specified parameters.
@@ -2524,8 +2525,8 @@ class Llama:
         # Sampling Params
         no_perf: bool = False,
         last_n_tokens_size: int = 64,
-        type_k: Optional[int] = None,
-        type_v: Optional[int] = None,
+        type_k: Optional[GGMLType] = None,
+        type_v: Optional[GGMLType] = None,
     ) -> None:
         """Free the existing context and create a new one with specified parameters.
         
