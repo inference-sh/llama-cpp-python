@@ -1491,10 +1491,10 @@ class Llama:
                             usage=None,
                         )
 
-            if len(completion_tokens) >= max_tokens:
-                text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
-                finish_reason = "length"
-                break
+            # if len(completion_tokens) >= max_tokens:
+            #     text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
+            #     finish_reason = "length"
+            #     break
 
         if stopping_criteria is not None and stopping_criteria(
             self._input_ids, self._scores[-1, :]
