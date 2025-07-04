@@ -2681,7 +2681,6 @@ def functionary_v1_v2_chat_handler(
             usage=completion["usage"],
         )
 
-
 class Llava15ChatHandler:
     DEFAULT_SYSTEM_MESSAGE: Optional[str] = (
         "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions."
@@ -2722,9 +2721,9 @@ class Llava15ChatHandler:
         "{% endif %}"
     )
 
-    def __init__(self, clip_model_path: str, llama_model: Optional[llama.Llama] = None, verbose: bool = True):
+    def __init__(self, clip_model_path: str, verbose: bool = True):
         import llama_cpp.mtmd_cpp as mtmd_cpp
-        
+
         self.clip_model_path = clip_model_path
         self.verbose = verbose
         self._mtmd_cpp = mtmd_cpp
@@ -2768,15 +2767,6 @@ class Llava15ChatHandler:
                         self.mtmd_ctx = None
 
             self._exit_stack.callback(mtmd_free)
-
-    def __call__(self, *args, **kwargs):
-        if self.clip_ctx is None:
-            # Initialize MTMD context with the llama model from the first argument
-            if len(args) > 0 and isinstance(args[0], llama.Llama):
-                self.initialize_mtmd_context(args[0])
-            else:
-                raise ValueError("MTMD context not initialized. Please call initialize_mtmd_context with a llama model first.")
-        return super().__call__(*args, **kwargs)
 
     def load_image(self, image_url: str) -> bytes:
         return self._load_image(image_url)
@@ -3061,26 +3051,6 @@ class Llava15ChatHandler:
                 tool_name, completion_or_chunks, stream
             )
         return _convert_completion_to_chat(completion_or_chunks, stream=stream)
-
-    def eval_image(self, llama: llama.Llama, image_url: str):
-        image_bytes = self.load_image(image_url)
-        embed = self._embed_image_bytes(image_bytes, llama.context_params.n_threads_batch)
-        if llama.n_tokens + embed.contents.n_image_pos > llama.n_ctx():
-            raise ValueError(
-                f"Prompt exceeds n_ctx: {llama.n_tokens + embed.contents.n_image_pos} > {llama.n_ctx()}"
-            )
-        n_past = ctypes.c_int(llama.n_tokens)
-        n_past_p = ctypes.pointer(n_past)
-        with suppress_stdout_stderr(disable=self.verbose):
-            self._mtmd_cpp.mtmd_cpp_eval_image_embed(
-                llama.ctx,
-                embed,
-                llama.n_batch,
-                n_past_p,
-            )
-        # Required to avoid issues with hf tokenizer
-        llama.input_ids[llama.n_tokens : n_past.value] = -1
-        llama.n_tokens = n_past.value
 
     @staticmethod
     def _load_image(image_url: str) -> bytes:
