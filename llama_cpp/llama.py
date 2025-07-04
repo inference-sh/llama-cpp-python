@@ -2560,9 +2560,10 @@ class Llama:
             type_v: Data type for V cache.
         """
         
-        current_state = self.save_state()
-        
+        current_state = None
+                
         if self._ctx is not None:
+            current_state = self.save_state()
             self._ctx.close()
             self._ctx = None
             
