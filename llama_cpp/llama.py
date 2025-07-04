@@ -2454,6 +2454,9 @@ class Llama:
         self.context_params.no_perf = no_perf
         self.last_n_tokens_size = last_n_tokens_size
         
+        # Store logits_all as instance attribute
+        self._logits_all = self.context_params.logits_all
+        
          # Set the default value for the context and correct the batch
         if n_ctx == 0:
             n_ctx = self._model.n_ctx_train()
