@@ -477,10 +477,6 @@ class Llama:
                 print(
                     f"Using fallback chat format: {self.chat_format}", file=sys.stderr
                 )
-
-        if self.chat_handler is not None:
-            if isinstance(self.chat_handler, llama_chat_format.Llava15ChatHandler):
-                self.chat_handler.initialize_mtmd_context(self)
                 
         self._sampler = None
 
