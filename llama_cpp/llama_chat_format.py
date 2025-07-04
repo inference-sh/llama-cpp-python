@@ -2723,6 +2723,8 @@ class Llava15ChatHandler:
     )
 
     def __init__(self, clip_model_path: str, llama_model: Optional[llama.Llama] = None, verbose: bool = True):
+        import llama_cpp.mtmd_cpp as mtmd_cpp
+        
         self.clip_model_path = clip_model_path
         self.verbose = verbose
         self._mtmd_cpp = mtmd_cpp
@@ -3087,11 +3089,18 @@ class Llava15ChatHandler:
             import base64
             image_bytes = base64.b64decode(image_url.split(",")[1])
             return image_bytes
-        else:
+        elif image_url.startswith("http") or image_url.startswith("https"):
             import urllib.request
             with urllib.request.urlopen(image_url) as f:
                 image_bytes = f.read()
                 return image_bytes
+        else:
+            import os
+            if os.path.exists(image_url):
+                with open(image_url, "rb") as f:
+                    image_bytes = f.read()
+                    return image_bytes
+            raise ValueError(f"Image file does not exist: {image_url}")
 
     @staticmethod
     def get_image_urls(messages: List[llama_types.ChatCompletionRequestMessage]):
