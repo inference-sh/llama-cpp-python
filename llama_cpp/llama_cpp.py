@@ -805,8 +805,7 @@ class llama_model_params(ctypes.Structure):
 #                       // ref: https://github.com/ggml-org/llama.cpp/pull/14363
 # };
 class llama_context_params(ctypes.Structure):
-    """Parameters for llama_context. NOTE: changing the default values of parameters marked as [EXPERIMENTAL] 
-    may cause crashes or incorrect results in certain configurations.
+    """Parameters for llama_context_params, matching the C struct for context creation.
 
     Attributes:
         n_ctx (int): text context, 0 = from model
@@ -815,9 +814,10 @@ class llama_context_params(ctypes.Structure):
         n_seq_max (int): max number of sequences (i.e. distinct states for recurrent models)
         n_threads (int): number of threads to use for generation
         n_threads_batch (int): number of threads to use for batch processing
-        rope_scaling_type (int): RoPE scaling type, from `enum llama_rope_scaling_type`
+        rope_scaling_type (int): RoPE scaling type, from enum llama_rope_scaling_type
         pooling_type (int): whether to pool (sum) embedding results by sequence id
         attention_type (int): attention type to use for embeddings
+        flash_attn_type (int): when to enable Flash Attention
         rope_freq_base (float): RoPE base frequency, 0 = from model
         rope_freq_scale (float): RoPE frequency scaling factor, 0 = from model
         yarn_ext_factor (float): YaRN extrapolation mix factor, negative = from model
@@ -825,17 +825,16 @@ class llama_context_params(ctypes.Structure):
         yarn_beta_fast (float): YaRN low correction dim
         yarn_beta_slow (float): YaRN high correction dim
         yarn_orig_ctx (int): YaRN original context size
-        defrag_thold (float): defragment the KV cache if holes/size > thold, <= 0 disabled (default)
+        defrag_thold (float): [DEPRECATED] defragment the KV cache if holes/size > thold, <= 0 disabled (default)
         cb_eval (ggml_backend_sched_eval_callback): callback for scheduling eval
-        cb_eval_user_data (ctypes.ctypes.c_void_p): user data for cb_eval
-        type_k (int): data type for K cache
-        type_v (int): data type for V cache
-        abort_callback (ggml_abort_callback): abort callback if it returns true, execution of llama_decode() will be aborted
-        abort_callback_data (ctypes.ctypes.c_void_p): data for abort_callback
+        cb_eval_user_data (ctypes.c_void_p): user data for cb_eval
+        type_k (int): data type for K cache [EXPERIMENTAL]
+        type_v (int): data type for V cache [EXPERIMENTAL]
+        abort_callback (ggml_abort_callback): abort callback for llama_decode
+        abort_callback_data (ctypes.c_void_p): user data for abort_callback
         embeddings (bool): if true, extract embeddings (together with logits)
-        offload_kqv (bool): whether to offload the KQV ops (including the KV cache) to GPU
-        flash_attn (bool): whether to use flash attention
-        no_perf (bool): whether to measure performance timings
+        offload_kqv (bool): offload the KQV ops (including the KV cache) to GPU
+        no_perf (bool): measure performance timings
         op_offload (bool): offload host tensor operations to device
         swa_full (bool): use full-size SWA cache
         kv_unified (bool): use a unified buffer across the input sequences when computing the attention
@@ -851,6 +850,7 @@ class llama_context_params(ctypes.Structure):
         rope_scaling_type: int
         pooling_type: int
         attention_type: int
+        flash_attn_type: int
         rope_freq_base: float
         rope_freq_scale: float
         yarn_ext_factor: float
@@ -867,7 +867,6 @@ class llama_context_params(ctypes.Structure):
         abort_callback_data: ctypes.c_void_p
         embeddings: bool
         offload_kqv: bool
-        flash_attn: bool
         no_perf: bool
         op_offload: bool
         swa_full: bool
@@ -880,9 +879,10 @@ class llama_context_params(ctypes.Structure):
         ("n_seq_max", ctypes.c_uint32),
         ("n_threads", ctypes.c_int32),
         ("n_threads_batch", ctypes.c_int32),
-        ("rope_scaling_type", ctypes.c_int),
-        ("pooling_type", ctypes.c_int),
-        ("attention_type", ctypes.c_int),
+        ("rope_scaling_type", ctypes.c_int),  # enum llama_rope_scaling_type
+        ("pooling_type", ctypes.c_int),       # enum llama_pooling_type
+        ("attention_type", ctypes.c_int),     # enum llama_attention_type
+        ("flash_attn_type", ctypes.c_int),    # enum llama_flash_attn_type
         ("rope_freq_base", ctypes.c_float),
         ("rope_freq_scale", ctypes.c_float),
         ("yarn_ext_factor", ctypes.c_float),
@@ -893,13 +893,13 @@ class llama_context_params(ctypes.Structure):
         ("defrag_thold", ctypes.c_float),
         ("cb_eval", ggml_backend_sched_eval_callback),
         ("cb_eval_user_data", ctypes.c_void_p),
-        ("type_k", ctypes.c_int),
-        ("type_v", ctypes.c_int),
+        ("type_k", ctypes.c_int),  # enum ggml_type
+        ("type_v", ctypes.c_int),  # enum ggml_type
         ("abort_callback", ggml_abort_callback),
         ("abort_callback_data", ctypes.c_void_p),
+        # Booleans at the end for alignment
         ("embeddings", ctypes.c_bool),
         ("offload_kqv", ctypes.c_bool),
-        ("flash_attn", ctypes.c_bool),
         ("no_perf", ctypes.c_bool),
         ("op_offload", ctypes.c_bool),
         ("swa_full", ctypes.c_bool),

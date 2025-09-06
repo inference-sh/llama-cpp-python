@@ -872,7 +872,7 @@ class Llama:
                     penalize_nl=penalize_nl,
                     idx=sample_idx,
                 )
-
+                
                 sample_idx += 1
                 if stopping_criteria is not None and stopping_criteria(
                     self._input_ids[: sample_idx], self._scores[sample_idx - self.n_tokens, :]
@@ -982,7 +982,7 @@ class Llama:
         data: Union[List[List[float]], List[List[List[float]]]] = []
 
         def decode_batch(seq_sizes: List[int]):
-            llama_cpp.llama_kv_cache_clear(self._ctx.ctx)
+            self._ctx.kv_cache_clear()
             self._ctx.decode(self._batch)
             self._batch.reset()
 
@@ -1053,7 +1053,7 @@ class Llama:
 
         output = data[0] if isinstance(input, str) else data
 
-        llama_cpp.llama_kv_cache_clear(self._ctx.ctx)
+        self._ctx.kv_cache_clear()
         self.reset()
 
         if return_count:
@@ -1350,7 +1350,7 @@ class Llama:
                 text = all_text[: all_text.index(first_stop)]
                 finish_reason = "stop"
                 break
-
+            
             if stream:
                 remaining_tokens = completion_tokens[returned_tokens:]
                 remaining_text = self.detokenize(
@@ -2435,6 +2435,7 @@ class Llama:
             yarn_beta_slow if yarn_beta_slow != 0.0 else 0
         )
         self.context_params.yarn_orig_ctx = yarn_orig_ctx if yarn_orig_ctx != 0 else 0
+
         self.context_params.logits_all = (
             logits_all if self.draft_model is None else True
         )  # Must be set to True for speculative decoding
@@ -2479,7 +2480,7 @@ class Llama:
         
         self.input_ids: npt.NDArray[np.intc] = np.ndarray((n_ctx,), dtype=np.intc)
         self.scores: npt.NDArray[np.single] = np.ndarray(
-            (n_ctx if logits_all == True else n_batch, self._n_vocab), dtype=np.single
+            (n_ctx if logits_all else n_batch, self._n_vocab), dtype=np.single
         )
         
         self._batch = self._stack.enter_context(
