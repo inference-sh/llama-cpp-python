@@ -1,11 +1,12 @@
 import multiprocessing
-import ctypes
-
+import os
 from huggingface_hub import hf_hub_download
-
 import pytest
-
 import llama_cpp
+from llama_cpp.llama_chat_format import Llava15ChatHandler
+
+# Enable HF transfer
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 
 @pytest.fixture
 def mmproj_model_path():
@@ -23,8 +24,9 @@ def llava_cpp_model_path():
 
 def test_real_llava(llava_cpp_model_path, mmproj_model_path):
     print("initializing model")
-    model = llama_cpp.Llama(
-        llava_cpp_model_path,
+    model = llama_cpp.Llama.from_pretrained(
+        repo_id="second-state/Llava-v1.5-7B-GGUF",
+        filename="llava-v1.5-7b-Q8_0.gguf",
         n_ctx=2048,
         n_batch=512,
         n_threads=multiprocessing.cpu_count(),
@@ -34,9 +36,9 @@ def test_real_llava(llava_cpp_model_path, mmproj_model_path):
     )
 
     # Initialize the LLaVA chat handler
-    from llama_cpp.llama_chat_format import Llava15ChatHandler
     print("initializing chat handler")
-    chat_handler = Llava15ChatHandler(clip_model_path=mmproj_model_path, llama_model=model)
+    chat_handler = Llava15ChatHandler(clip_model_path=mmproj_model_path)
+    model.chat_handler = chat_handler
 
     # Create a chat message with the image
     print("creating chat message")
@@ -58,13 +60,13 @@ def test_real_llava(llava_cpp_model_path, mmproj_model_path):
 
     # Generate response
     print("generating response")
-    response = chat_handler(
-        llama=model,
+    response = model.create_chat_completion(
         messages=messages,
         max_tokens=200,
         temperature=0.2,
         top_p=0.95,
-        stream=False
+        stream=False,
+        stop=['<end_of_turn>', '<eos>']
     )
 
     print("response", response)
