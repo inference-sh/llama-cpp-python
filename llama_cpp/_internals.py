@@ -685,10 +685,6 @@ class LlamaSampler:
         sampler = llama_cpp.llama_sampler_init_dist(seed)
         llama_cpp.llama_sampler_chain_add(self.sampler, sampler)
 
-    def add_softmax(self):
-        sampler = llama_cpp.llama_sampler_init_softmax()
-        llama_cpp.llama_sampler_chain_add(self.sampler, sampler)
-
     def add_top_k(self, k: int):
         sampler = llama_cpp.llama_sampler_init_top_k(k)
         llama_cpp.llama_sampler_chain_add(self.sampler, sampler)
