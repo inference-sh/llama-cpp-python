@@ -1,6 +1,5 @@
 import json
 import os
-import platform
 from collections.abc import Iterator
 from typing import cast
 
@@ -155,10 +154,6 @@ def is_accelerator_available() -> bool:
             ),
         ),
     ],
-)
-@pytest.mark.skipif(
-    platform.system() == "Darwin" and (os.cpu_count() or 1) < 8,
-    reason="Insufficient resources on macOS",
 )
 def test_llama_cpp_python_tool_use(
     llm_repo_id: str,
