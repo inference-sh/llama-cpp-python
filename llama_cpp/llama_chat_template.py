@@ -486,6 +486,8 @@ def _handle_streaming_tool_calls(
                     ):
                         param_text = param_chunk["choices"][0]["text"]
                         # Convert to chat completion chunk and yield
+                        print(f"param_text: {param_text}")
+                        accumulated_text += param_text
                         yield {
                             "id": "chat" + name_completion["id"],
                             "object": "chat.completion.chunk",
@@ -509,7 +511,6 @@ def _handle_streaming_tool_calls(
                                 "finish_reason": None
                             }]
                         }
-                        accumulated_text += param_text
 
                     # After completing the tool call parameters, continue with more completions
                     # Recursively handle the next completion by starting a new generation
