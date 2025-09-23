@@ -1348,7 +1348,12 @@ class Llama:
             if len(any_stop) > 0:
                 first_stop = any_stop[0]
                 text = all_text[: all_text.index(first_stop)]
-                finish_reason = "stop"
+                # Ensure first_stop is a string for concatenation
+                if isinstance(first_stop, bytes):
+                    first_stop_str = first_stop.decode("utf-8", errors="replace")
+                else:
+                    first_stop_str = first_stop
+                finish_reason = "stop:" + first_stop_str
                 break
             
             if stream:

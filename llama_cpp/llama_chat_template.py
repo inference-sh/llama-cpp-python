@@ -248,6 +248,507 @@ class Jinja2ChatFormatter(ChatFormatter):
     def to_chat_handler(self) -> LlamaChatCompletionHandler:
         return chat_formatter_to_chat_completion_handler(self)
 
+def _detect_tool_call_and_get_tool(
+    response_text: str,
+    tools: List[llama_types.ChatCompletionTool],
+    prompt: str,
+    llama: llama.Llama,
+    verbose: bool = False
+) -> Tuple[Optional[llama_types.ChatCompletionTool], Optional[str]]:
+    """Detect tool call in response and return the tool and tool name completion.
+
+    Returns:
+        Tuple of (tool, tool_name_completion_text) or (None, None) if no tool call found
+    """
+    if not response_text.rstrip().endswith("<tool_call>"):
+        return None, None
+
+    if verbose:
+        print("[DEBUG] Found tool call tag, switching to tool grammar", file=sys.stderr)
+
+    try:
+        name_grammar = _grammar_for_tool_name(tools, verbose=verbose)
+
+        # Generate tool name
+        tool_name_completion = llama.create_completion(
+            prompt=prompt + response_text,
+            temperature=0,
+            stream=False,
+            stop=[":"],
+            max_tokens=None,
+            grammar=name_grammar,
+        )
+
+        # Get the selected tool
+        tool_name = tool_name_completion["choices"][0]["text"].split("\n")[-1][len("functions."):-1]
+        tool = next((t for t in tools if t["function"]["name"] == tool_name), None)
+
+        if tool is None and verbose:
+            print(f"[DEBUG] Tool {tool_name} not found", file=sys.stderr)
+
+        return tool, tool_name_completion["choices"][0]["text"]
+
+    except Exception as e:
+        if verbose:
+            print(f"[DEBUG] Failed to create tool call grammar: {e}", file=sys.stderr)
+        return None, None
+
+
+def _parse_auto_tool_choice_response(
+    completion_result: llama_types.CreateCompletionResponse,
+    tools: List[llama_types.ChatCompletionTool],
+    verbose: bool = False
+) -> Optional[llama_types.CreateChatCompletionResponse]:
+    """Parse response for auto tool choice and return chat completion with tool calls if found.
+
+    Returns:
+        Chat completion response with tool calls if found, None otherwise
+    """
+    response_text = completion_result["choices"][0]["text"]
+
+    if verbose:
+        print(f"[DEBUG] Auto tool choice triggered. Response text: {response_text[:200]}...", file=sys.stderr)
+        print("[DEBUG] Looking for tool_call tags...", file=sys.stderr)
+
+    # Parse the response similar to how template handles <think></think> and <tool_call></tool_call>
+    message_content = response_text
+    tool_call_json = None
+
+    # Look for <tool_call> tags in the response
+    tool_call_start_idx = response_text.find("<tool_call>")
+    if tool_call_start_idx >= 0 and "</tool_call>" in response_text:
+        if verbose:
+            print("[DEBUG] Found tool_call tags, attempting to parse", file=sys.stderr)
+        try:
+            # Extract content between <tool_call> tags (like template does)
+            tool_call_start = tool_call_start_idx + len("<tool_call>")
+            tool_call_end = response_text.find("</tool_call>")
+
+            # Switch to grammar strict mode for tool call content
+            if tool_call_start_idx > 0:
+                # Get content before tool call tag
+                pre_tool_call = response_text[:tool_call_start_idx].strip()
+                if pre_tool_call:
+                    # Store pre-tool call content
+                    message_content = pre_tool_call
+
+            if tool_call_start >= 0 and tool_call_end > tool_call_start:
+                # Switch to grammar strict mode for tool call content
+                tool_call_content = response_text[tool_call_start:tool_call_end].strip()
+                if verbose:
+                    print(f"[DEBUG] Extracted tool_call content: {tool_call_content}", file=sys.stderr)
+                    print("[DEBUG] Switching to grammar strict mode for tool call", file=sys.stderr)
+
+                parsed_json = json.loads(tool_call_content)
+
+                # Check if it's a valid tool call
+                if (parsed_json.get("type") == "tool_use" and
+                    "name" in parsed_json and
+                    "input" in parsed_json):
+
+                    if verbose:
+                        print(f"[DEBUG] Valid tool call found: {parsed_json.get('name')}", file=sys.stderr)
+                    tool_call_json = parsed_json
+                    # Extract message content before the <tool_call> tag
+                    message_content = response_text[:response_text.find("<tool_call>")].strip()
+
+        except json.JSONDecodeError as e:
+            # Not valid JSON, treat as pure message
+            if verbose:
+                print(f"[DEBUG] Tool call JSON parsing failed: {e}. JSON text: {tool_call_content[:200]}...", file=sys.stderr)
+            pass
+    else:
+        if verbose:
+            has_start = "<tool_call>" in response_text
+            has_end = "</tool_call>" in response_text
+            print(f"[DEBUG] Tool call tags not found. Has start tag: {has_start}, Has end tag: {has_end}", file=sys.stderr)
+
+    if verbose:
+        print(f"[DEBUG] Final tool_call_json: {tool_call_json is not None}", file=sys.stderr)
+
+    # If we found a valid tool call, build the response
+    if tool_call_json:
+        if verbose:
+            print(f"[DEBUG] Building tool call response for {tool_call_json['name']}", file=sys.stderr)
+        tool_name = tool_call_json["name"]
+        tool_input = tool_call_json["input"]
+        tool_id = "call_0_" + tool_name + "_" + completion_result["id"]
+
+        return {
+            "id": "chat" + completion_result["id"],
+            "object": "chat.completion",
+            "created": completion_result["created"],
+            "model": completion_result["model"],
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": message_content if message_content else None,
+                    "tool_calls": [{
+                        "id": tool_id,
+                        "type": "function",
+                        "function": {
+                            "name": tool_name,
+                            "arguments": json.dumps(tool_input),
+                        },
+                    }],
+                },
+                "logprobs": _convert_text_completion_logprobs_to_chat(
+                    completion_result["choices"][0]["logprobs"]
+                ),
+                "finish_reason": "tool_calls",
+            }],
+            "usage": completion_result["usage"],
+        }
+
+    return None
+
+
+def _handle_streaming_tool_calls(
+    completion_or_chunks: Iterator[llama_types.CreateCompletionStreamResponse],
+    tools: List[llama_types.ChatCompletionTool],
+    prompt: str,
+    llama: llama.Llama,
+    base_completion_kwargs: Dict[str, Any],
+) -> Iterator[llama_types.ChatCompletionChunk]:
+    """Handle streaming completions with tool call detection and grammar switching.
+
+    Yields:
+        Chat completion chunks as they become available
+    """
+    accumulated_text = ""
+
+    for chunk in cast(Iterator[llama_types.CreateCompletionStreamResponse], completion_or_chunks):
+        text = chunk["choices"][0]["text"]
+        accumulated_text += text
+        stop_reason = chunk["choices"][0]["finish_reason"]
+        if stop_reason == "stop:<tool_call>":
+            # Found tool call, switch to grammar mode
+            print("[DEBUG TOOLS] Found tool call, switching to grammar mode", file=sys.stderr)
+
+            # Use the helper function to detect tool and get tool name
+            try:
+                tool, tool_name_completion_text = _detect_tool_call_and_get_tool(
+                    accumulated_text, tools, prompt, llama, llama.verbose
+                )
+
+                if tool:
+                    # Get tool parameters grammar
+                    tool_grammar = _grammar_for_tool_parameters(tool, verbose=llama.verbose)
+
+                    # Continue generation with tool grammar
+                    new_prompt = prompt + accumulated_text + tool_name_completion_text + "\n"
+                    for tool_chunk in llama.create_completion(
+                        prompt=new_prompt,
+                        grammar=tool_grammar,
+                        stream=True,
+                        stop=["</tool_call>"],
+                        **base_completion_kwargs
+                    ):
+                        yield from _convert_text_completion_chunks_to_chat(iter([tool_chunk]))
+
+                    # After tool call, continue normal streaming
+                    for remaining_chunk in llama.create_completion(
+                        prompt=new_prompt,
+                        stream=True,
+                        **base_completion_kwargs
+                    ):
+                        yield from _convert_text_completion_chunks_to_chat(iter([remaining_chunk]))
+
+            except Exception as e:
+                if llama.verbose:
+                    print(f"[DEBUG] Failed to stream tool call: {e}", file=sys.stderr)
+                # Fall back to regular streaming without grammar
+                for fallback_chunk in llama.create_completion(
+                    prompt=prompt + accumulated_text,
+                    stream=True,
+                    **base_completion_kwargs
+                ):
+                    yield from _convert_text_completion_chunks_to_chat(iter([fallback_chunk]))
+        else:
+            # Keep streaming normally until we find a tool call
+            yield from _convert_text_completion_chunks_to_chat(iter([chunk]))
+
+
+def _handle_non_streaming_tool_calls(
+    completion: llama_types.CreateCompletionResponse,
+    tools: List[llama_types.ChatCompletionTool],
+    prompt: str,
+    llama: llama.Llama,
+    base_completion_kwargs: Dict[str, Any],
+    stream: bool = False
+) -> llama_types.CreateCompletionResponse:
+    """Handle non-streaming completions with tool call detection and grammar switching.
+
+    Returns:
+        Modified completion response with tool call content included
+    """
+    response_text = completion["choices"][0]["text"]
+
+    if response_text.rstrip().endswith("<tool_call>"):
+        tool, tool_name_completion_text = _detect_tool_call_and_get_tool(
+            response_text, tools, prompt, llama, llama.verbose
+        )
+
+        # Get the tool parameters grammar if tool exists
+        tool_grammar = _grammar_for_tool_parameters(tool, verbose=llama.verbose) if tool else None
+
+        # Continue generation with tool grammar
+        tool_completion = llama.create_completion(
+            prompt=prompt + response_text,  # Include previous response
+            stream=stream,
+            stop=["</tool_call>"],  # Stop at tool call end tag
+            stopping_criteria=completion.get("stopping_criteria"),
+            grammar=tool_grammar,  # Use tool call grammar
+            **base_completion_kwargs,
+        )
+
+        # Combine the completions
+        return {
+            **completion,
+            "choices": [{
+                **completion["choices"][0],
+                "text": response_text + tool_completion["choices"][0]["text"]
+            }]
+        }
+
+    return completion
+
+
+def _setup_tools_and_grammar(
+    functions: Optional[List[llama_types.ChatCompletionFunction]],
+    function_call: Optional[llama_types.ChatCompletionRequestFunctionCall],
+    tools: Optional[List[llama_types.ChatCompletionTool]],
+    tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption],
+    response_format: Optional[llama_types.ChatCompletionRequestResponseFormat],
+    grammar: Optional[llama.LlamaGrammar],
+    llama: llama.Llama,
+) -> Tuple[
+    Optional[List[llama_types.ChatCompletionTool]],
+    Optional[llama_types.ChatCompletionToolChoiceOption],
+    Optional[llama.LlamaGrammar],
+    Optional[llama_types.ChatCompletionTool]
+]:
+    """Setup tools, tool_choice, grammar and return selected tool if any.
+
+    Returns:
+        Tuple of (tools, tool_choice, grammar, selected_tool)
+    """
+    # Convert legacy functions to tools
+    if functions is not None:
+        tools = [
+            {
+                "type": "function",
+                "function": function,
+            }
+            for function in functions
+        ]
+
+    # Convert legacy function_call to tool_choice
+    if function_call is not None:
+        if isinstance(function_call, str) and (
+            function_call == "none" or function_call == "auto"
+        ):
+            tool_choice = function_call
+        if isinstance(function_call, dict) and "name" in function_call:
+            tool_choice = {
+                "type": "function",
+                "function": {
+                    "name": function_call["name"],
+                },
+            }
+
+    # Handle response format grammar
+    if response_format is not None and response_format["type"] == "json_object":
+        grammar = _grammar_for_response_format(
+            response_format, verbose=llama.verbose
+        )
+
+    # Handle specific tool choice
+    tool = None
+    if (
+        tool_choice is not None
+        and isinstance(tool_choice, dict)
+        and tools is not None
+    ):
+        name = tool_choice["function"]["name"]
+        tool = next((t for t in tools if t["function"]["name"] == name), None)
+        if tool is None:
+            raise ValueError(f"Tool choice '{name}' not found in tools.")
+        schema = tool["function"]["parameters"]
+        try:
+            # create grammar from json schema
+            grammar = llama_grammar.LlamaGrammar.from_json_schema(
+                json.dumps(schema), verbose=llama.verbose
+            )
+        except Exception as e:
+            if llama.verbose:
+                print(str(e), file=sys.stderr)
+            grammar = llama_grammar.LlamaGrammar.from_string(
+                llama_grammar.JSON_GBNF, verbose=llama.verbose
+            )
+
+    return tools, tool_choice, grammar, tool
+
+
+def _handle_streaming_completion(
+    prompt: str,
+    stop: Optional[Union[str, List[str]]],
+    stopping_criteria: Optional[llama.StoppingCriteriaList],
+    grammar: Optional[llama.LlamaGrammar],
+    tool: Optional[llama_types.ChatCompletionTool],
+    tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption],
+    tools: Optional[List[llama_types.ChatCompletionTool]],
+    llama: llama.Llama,
+    base_completion_kwargs: Dict[str, Any],
+) -> Iterator[llama_types.ChatCompletionChunk]:
+    """Handle streaming completion path with tool call detection."""
+
+    # If specific tool is selected, use function call conversion
+    if tool is not None:
+        completion_chunks = llama.create_completion(
+            prompt=prompt,
+            stream=True,
+            stop=stop,
+            stopping_criteria=stopping_criteria,
+            grammar=grammar,
+            **base_completion_kwargs,
+        )
+        tool_name = tool["function"]["name"]
+        yield from _convert_completion_to_chat_function(
+            tool_name, completion_chunks, stream=True
+        )
+        return
+
+    # Handle auto tool choice for streaming
+    if tool_choice == "auto" and tools is not None and len(tools) > 0:
+        # First generate normally until we hit a tool call tag
+        completion_chunks = llama.create_completion(
+            prompt=prompt,
+            stream=True,
+            stop="<tool_call>",
+            stopping_criteria=stopping_criteria,
+            grammar=grammar,
+            **base_completion_kwargs,
+        )
+
+        # Use helper function to handle streaming with tool call detection
+        yield from _handle_streaming_tool_calls(
+            completion_chunks, tools, prompt, llama, base_completion_kwargs
+        )
+        return
+
+    # Regular streaming completion (no tools)
+    completion_chunks = llama.create_completion(
+        prompt=prompt,
+        stream=True,
+        stop=stop,
+        stopping_criteria=stopping_criteria,
+        grammar=grammar,
+        **base_completion_kwargs,
+    )
+    yield from _convert_completion_to_chat(completion_chunks, stream=True)
+
+
+def _handle_non_streaming_completion(
+    prompt: str,
+    stop: Optional[Union[str, List[str]]],
+    stopping_criteria: Optional[llama.StoppingCriteriaList],
+    grammar: Optional[llama.LlamaGrammar],
+    tool: Optional[llama_types.ChatCompletionTool],
+    tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption],
+    tools: Optional[List[llama_types.ChatCompletionTool]],
+    llama: llama.Llama,
+    base_completion_kwargs: Dict[str, Any],
+) -> llama_types.CreateChatCompletionResponse:
+    """Handle non-streaming completion path with tool call detection."""
+
+    # If specific tool is selected, use function call conversion
+    if tool is not None:
+        completion = llama.create_completion(
+            prompt=prompt,
+            stream=False,
+            stop=stop,
+            stopping_criteria=stopping_criteria,
+            grammar=grammar,
+            **base_completion_kwargs,
+        )
+        tool_name = tool["function"]["name"]
+        return _convert_completion_to_chat_function(
+            tool_name, completion, stream=False
+        )
+
+    # Handle auto tool choice for non-streaming
+    if tool_choice == "auto" and tools is not None and len(tools) > 0:
+        # First generate normally until we hit a tool call tag
+        completion = llama.create_completion(
+            prompt=prompt,
+            stream=False,
+            stop=["<tool_call>"],  # Stop at tool call start tag
+            stopping_criteria=stopping_criteria,
+            grammar=grammar,
+            **base_completion_kwargs,
+        )
+
+        response_text = completion["choices"][0]["text"]
+
+        # If we hit a tool call tag, handle tool call continuation
+        if response_text.rstrip().endswith("<tool_call>"):
+            tool_detected, tool_name_completion_text = _detect_tool_call_and_get_tool(
+                response_text, tools, prompt, llama, llama.verbose
+            )
+
+            if tool_detected:
+                # Create grammar for tool parameters
+                tool_grammar = _grammar_for_tool_parameters(tool_detected, verbose=llama.verbose)
+                # Update response_text to include tool name
+                response_text += tool_name_completion_text
+            else:
+                tool_grammar = None
+
+            # Continue generation with tool grammar
+            tool_completion = llama.create_completion(
+                prompt=prompt + response_text,  # Include previous response
+                stream=False,
+                stop=["</tool_call>"],  # Stop at tool call end tag
+                stopping_criteria=stopping_criteria,
+                grammar=tool_grammar,  # Use tool call grammar
+                **base_completion_kwargs,
+            )
+
+            # Combine the completions
+            combined_completion = {
+                **completion,
+                "choices": [{
+                    **completion["choices"][0],
+                    "text": response_text + tool_completion["choices"][0]["text"]
+                }]
+            }
+        else:
+            combined_completion = completion
+
+        # Try to parse auto tool choice response
+        auto_tool_response = _parse_auto_tool_choice_response(
+            combined_completion, tools, llama.verbose
+        )
+        if auto_tool_response:
+            return auto_tool_response
+
+        # If no tool call found, return regular chat completion
+        return _convert_completion_to_chat(combined_completion, stream=False)
+
+    # Regular non-streaming completion (no tools)
+    completion = llama.create_completion(
+        prompt=prompt,
+        stream=False,
+        stop=stop,
+        stopping_criteria=stopping_criteria,
+        grammar=grammar,
+        **base_completion_kwargs,
+    )
+    return _convert_completion_to_chat(completion, stream=False)
+
+
 def chat_formatter_to_chat_completion_handler(
     chat_formatter: ChatFormatter,
 ) -> LlamaChatCompletionHandler:
@@ -289,6 +790,29 @@ def chat_formatter_to_chat_completion_handler(
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
     ]:
+        # Common completion kwargs used throughout
+        base_completion_kwargs = {
+            "temperature": temperature,
+            "top_p": top_p,
+            "top_k": top_k,
+            "min_p": min_p,
+            "typical_p": typical_p,
+            "logprobs": top_logprobs if logprobs else None,
+            "seed": seed,
+            "max_tokens": max_tokens,
+            "presence_penalty": presence_penalty,
+            "frequency_penalty": frequency_penalty,
+            "repeat_penalty": repeat_penalty,
+            "tfs_z": tfs_z,
+            "mirostat_mode": mirostat_mode,
+            "mirostat_tau": mirostat_tau,
+            "mirostat_eta": mirostat_eta,
+            "model": model,
+            "logits_processor": logits_processor,
+            "logit_bias": logit_bias,
+        }
+
+        # Format the prompt using the chat formatter
         result = chat_formatter(
             messages=messages,
             functions=functions,
@@ -297,7 +821,7 @@ def chat_formatter_to_chat_completion_handler(
             tool_choice=tool_choice,
         )
 
-
+        # Prepare prompt and stopping criteria
         prompt = llama.tokenize(
             result.prompt.encode("utf-8"),
             add_bos=not result.added_special,
@@ -312,509 +836,24 @@ def chat_formatter_to_chat_completion_handler(
         if result.stopping_criteria is not None:
             stopping_criteria = result.stopping_criteria
 
-        if response_format is not None and response_format["type"] == "json_object":
-            grammar = _grammar_for_response_format(
-                response_format, verbose=llama.verbose
-            )
-
-        # Convert legacy functions to tools
-        if functions is not None:
-            tools = [
-                {
-                    "type": "function",
-                    "function": function,
-                }
-                for function in functions
-            ]
-
-        # Convert legacy function_call to tool_choice
-        if function_call is not None:
-            if isinstance(function_call, str) and (
-                function_call == "none" or function_call == "auto"
-            ):
-                tool_choice = function_call
-            if isinstance(function_call, dict) and "name" in function_call:
-                tool_choice = {
-                    "type": "function",
-                    "function": {
-                        "name": function_call["name"],
-                    },
-                }
-
-        tool = None
-        if (
-            tool_choice is not None
-            and isinstance(tool_choice, dict)
-            and tools is not None
-        ):
-            name = tool_choice["function"]["name"]
-            tool = next((t for t in tools if t["function"]["name"] == name), None)
-            if tool is None:
-                raise ValueError(f"Tool choice '{name}' not found in tools.")
-            schema = tool["function"]["parameters"]
-            try:
-                # create grammar from json schema
-                grammar = llama_grammar.LlamaGrammar.from_json_schema(
-                    json.dumps(schema), verbose=llama.verbose
-                )
-            except Exception as e:
-                if llama.verbose:
-                    print(str(e), file=sys.stderr)
-                grammar = llama_grammar.LlamaGrammar.from_string(
-                    llama_grammar.JSON_GBNF, verbose=llama.verbose
-                )
-
-        # Handle auto tool choice specially to detect function calls
-        if tool_choice == "auto" and tools is not None and len(tools) > 0:
-            # First generate normally until we hit a tool call tag
-            completion_or_chunks = llama.create_completion(
-                prompt=prompt,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                min_p=min_p,
-                typical_p=typical_p,
-                logprobs=top_logprobs if logprobs else None,
-                stream=stream,
-                stop=["<tool_call>"],  # Stop at tool call start tag
-                seed=seed,
-                max_tokens=max_tokens,
-                presence_penalty=presence_penalty,
-                frequency_penalty=frequency_penalty,
-                repeat_penalty=repeat_penalty,
-                tfs_z=tfs_z,
-                mirostat_mode=mirostat_mode,
-                mirostat_tau=mirostat_tau,
-                mirostat_eta=mirostat_eta,
-                model=model,
-                logits_processor=logits_processor,
-                stopping_criteria=stopping_criteria,
-                grammar=grammar,
-                logit_bias=logit_bias,
-            )
-            
-            # If we hit a tool call tag, create grammar and continue with tool call
-            if not stream:
-                completion = cast(llama_types.CreateCompletionResponse, completion_or_chunks)
-                response_text = completion["choices"][0]["text"]
-                
-                if response_text.rstrip().endswith("<tool_call>"):
-                    if llama.verbose:
-                        print("[DEBUG] Found tool call tag, switching to tool grammar", file=sys.stderr)
-                    
-                    # Create tool call grammar based on available tools
-                    function_names = " | ".join([f'''"functions.{t["function"]["name"]}:"''' for t in tools])
-                    tool_call_gbnf = (
-                        'root ::= "<tool_call>" "\\n" functions\n'
-                        f"functions ::= {function_names}\n"
-                    )
-                    
-                    # First get the tool name
-                    try:
-                        name_grammar = llama_grammar.LlamaGrammar.from_string(
-                            tool_call_gbnf,
-                            verbose=llama.verbose
-                        )
-                        
-                        # Generate tool name
-                        tool_name_completion = llama.create_completion(
-                            prompt=prompt + response_text,
-                            temperature=0,
-                            stream=False,
-                            stop=[":"],
-                            max_tokens=None,
-                            grammar=name_grammar,
-                        )
-                        
-                        # Get the selected tool
-                        tool_name = tool_name_completion["choices"][0]["text"].split("\n")[-1][len("functions."):-1]
-                        tool = next((t for t in tools if t["function"]["name"] == tool_name), None)
-                        
-                        if tool:
-                            # Create grammar for tool parameters
-                            try:
-                                tool_grammar = llama_grammar.LlamaGrammar.from_json_schema(
-                                    json.dumps(tool["function"]["parameters"]),
-                                    verbose=llama.verbose
-                                )
-                            except Exception as e:
-                                if llama.verbose:
-                                    print(f"[DEBUG] Failed to parse function parameters as JSON schema: {e}", file=sys.stderr)
-                                tool_grammar = llama_grammar.LlamaGrammar.from_string(
-                                    llama_grammar.JSON_GBNF,
-                                    verbose=llama.verbose
-                                )
-                        else:
-                            if llama.verbose:
-                                print(f"[DEBUG] Tool {tool_name} not found", file=sys.stderr)
-                            tool_grammar = None
-                    except Exception as e:
-                        if llama.verbose:
-                            print(f"[DEBUG] Failed to create tool call grammar: {e}", file=sys.stderr)
-                        tool_grammar = None
-
-                    # Continue generation with tool grammar
-                    tool_completion = llama.create_completion(
-                        prompt=prompt + response_text,  # Include previous response
-                        temperature=temperature,
-                        top_p=top_p,
-                        top_k=top_k,
-                        min_p=min_p,
-                        typical_p=typical_p,
-                        logprobs=top_logprobs if logprobs else None,
-                        stream=stream,
-                        stop=["</tool_call>"],  # Stop at tool call end tag
-                        seed=seed,
-                        max_tokens=max_tokens,
-                        presence_penalty=presence_penalty,
-                        frequency_penalty=frequency_penalty,
-                        repeat_penalty=repeat_penalty,
-                        tfs_z=tfs_z,
-                        mirostat_mode=mirostat_mode,
-                        mirostat_tau=mirostat_tau,
-                        mirostat_eta=mirostat_eta,
-                        model=model,
-                        logits_processor=logits_processor,
-                        stopping_criteria=stopping_criteria,
-                        grammar=tool_grammar,  # Use tool call grammar
-                        logit_bias=logit_bias,
-                    )
-                    
-                    # Combine the completions
-                    completion_or_chunks = {
-                        **completion,
-                        "choices": [{
-                            **completion["choices"][0],
-                            "text": response_text + tool_completion["choices"][0]["text"]
-                        }]
-                    }
-                    
-        else:
-            # Regular completion for specific tool choice or no tools
-            print("[DEBUG TOOLS] Starting initial completion...")
-            completion_or_chunks = llama.create_completion(
-                prompt=prompt,
-                temperature=temperature,
-                top_p=top_p,
-                top_k=top_k,
-                min_p=min_p,
-                typical_p=typical_p,
-                logprobs=top_logprobs if logprobs else None,
-                stream=stream,
-                stop=[*stop, "<tool_call>"],  # Stop at tool call tag
-            seed=seed,
-            max_tokens=max_tokens,
-            presence_penalty=presence_penalty,
-            frequency_penalty=frequency_penalty,
-            repeat_penalty=repeat_penalty,
-            tfs_z=tfs_z,
-            mirostat_mode=mirostat_mode,
-            mirostat_tau=mirostat_tau,
-            mirostat_eta=mirostat_eta,
-            model=model,
-            logits_processor=logits_processor,
-            stopping_criteria=stopping_criteria,
-            grammar=grammar,
-            logit_bias=logit_bias,
+        # Setup tools, tool_choice, and grammar
+        tools, tool_choice, grammar, tool = _setup_tools_and_grammar(
+            functions, function_call, tools, tool_choice, response_format, grammar, llama
         )
-        # Flow normally until we hit a tool call
+
+        # Completely separate streaming vs non-streaming paths
         if stream:
-            # For streaming, we need to accumulate text until we see a tool call
-            accumulated_text = ""
-            completion_kwargs = {
-                "temperature": temperature,
-                "top_p": top_p,
-                "top_k": top_k,
-                "min_p": min_p,
-                "typical_p": typical_p,
-                "presence_penalty": presence_penalty,
-                "frequency_penalty": frequency_penalty,
-                "repeat_penalty": repeat_penalty,
-                "tfs_z": tfs_z,
-                "mirostat_mode": mirostat_mode,
-                "mirostat_tau": mirostat_tau,
-                "mirostat_eta": mirostat_eta,
-                "model": model,
-                "logits_processor": logits_processor,
-                "logprobs": top_logprobs if logprobs else None,
-                "max_tokens": max_tokens,
-                "seed": seed,
-            }
-            
-            for chunk in cast(Iterator[llama_types.CreateCompletionStreamResponse], completion_or_chunks):
-                text = chunk["choices"][0]["text"]
-                accumulated_text += text
-                
-                if accumulated_text.rstrip().endswith("<tool_call>"):
-                    # Found tool call, switch to grammar mode
-                    print("[DEBUG TOOLS] Found tool call, switching to grammar mode")
-                    function_names = " | ".join([f'''"functions.{t["function"]["name"]}:"''' for t in tools]) if tools else ""
-                    tool_call_gbnf = (
-                        'root ::= "<tool_call>" "\\n" functions\n'
-                        f"functions ::= {function_names}\n"
-                    )
-                    
-                    # First get the tool name with grammar
-                    try:
-                        name_grammar = llama_grammar.LlamaGrammar.from_string(
-                            tool_call_gbnf,
-                            verbose=llama.verbose
-                        )
-                        
-                        # Generate tool name
-                        tool_name_completion = llama.create_completion(
-                            prompt=prompt + accumulated_text,
-                            temperature=0,
-                            stream=False,
-                            stop=[":"],
-                            max_tokens=None,
-                            grammar=name_grammar,
-                        )
-                        
-                        # Get the selected tool
-                        tool_name = tool_name_completion["choices"][0]["text"].split("\n")[-1][len("functions."):-1]
-                        tool = next((t for t in tools if t["function"]["name"] == tool_name), None)
-                        
-                        if tool:
-                            # Get tool parameters grammar
-                            tool_grammar = _grammar_for_tool_parameters(tool, verbose=llama.verbose)
-                            
-                            # Continue generation with tool grammar
-                            new_prompt = prompt + accumulated_text + tool_name_completion["choices"][0]["text"] + "\n"
-                            for chunk in llama.create_completion(
-                                prompt=new_prompt,
-                                grammar=tool_grammar,
-                                stream=True,
-                                stop=["</tool_call>"],
-                                **{k: v for k, v in completion_kwargs.items() if k != "stream" and k != "grammar"}
-                            ):
-                                yield from _convert_text_completion_chunks_to_chat(iter([chunk]))
-                            
-                            # After tool call, continue normal streaming
-                            for chunk in llama.create_completion(
-                                prompt=new_prompt,
-                                stream=True,
-                                **{k: v for k, v in completion_kwargs.items() if k != "stream"}
-                            ):
-                                yield from _convert_text_completion_chunks_to_chat(iter([chunk]))
-                                
-                    except Exception as e:
-                        if llama.verbose:
-                            print(f"[DEBUG] Failed to stream tool call: {e}", file=sys.stderr)
-                        # Fall back to regular streaming without grammar
-                        for chunk in llama.create_completion(
-                            prompt=prompt + accumulated_text,
-                            stream=True,
-                            **{k: v for k, v in completion_kwargs.items() if k != "stream"}
-                        ):
-                            yield from _convert_text_completion_chunks_to_chat(iter([chunk]))
-                else:
-                    # Keep streaming normally until we find a tool call
-                    yield from _convert_text_completion_chunks_to_chat(iter([chunk]))
-        else:
-            completion = cast(llama_types.CreateCompletionResponse, completion_or_chunks)
-            response_text = completion["choices"][0]["text"]
-            
-            if response_text.rstrip().endswith("<tool_call>"):
-                if llama.verbose:
-                    print("[DEBUG] Found tool call tag, switching to tool grammar", file=sys.stderr)
-                
-                # First get the tool name using the tool name grammar
-                try:
-                    name_grammar = _grammar_for_tool_name(tools, verbose=llama.verbose)
-                    
-                    # Generate tool name
-                    tool_name_completion = llama.create_completion(
-                        prompt=prompt + response_text,
-                        temperature=0,
-                        stream=False,
-                        stop=[":"],
-                        max_tokens=None,
-                        grammar=name_grammar,
-                    )
-                    
-                    # Get the selected tool
-                    tool_name = tool_name_completion["choices"][0]["text"].split("\n")[-1][len("functions."):-1]
-                    tool = next((t for t in tools if t["function"]["name"] == tool_name), None)
-                    
-                    # Get the tool parameters grammar if tool exists
-                    tool_grammar = _grammar_for_tool_parameters(tool, verbose=llama.verbose) if tool else None
-                    
-                    if tool is None and llama.verbose:
-                        print(f"[DEBUG] Tool {tool_name} not found", file=sys.stderr)
-                        
-                except Exception as e:
-                    if llama.verbose:
-                        print(f"[DEBUG] Failed to create tool call grammar: {e}", file=sys.stderr)
-                    tool_grammar = None
-
-                # Continue generation with tool grammar
-                tool_completion = llama.create_completion(
-                    prompt=prompt + response_text,  # Include previous response
-                    temperature=temperature,
-                    top_p=top_p,
-                    top_k=top_k,
-                    min_p=min_p,
-                    typical_p=typical_p,
-                    logprobs=top_logprobs if logprobs else None,
-                    stream=stream,
-                    stop=["</tool_call>"],  # Stop at tool call end tag
-                    seed=seed,
-                    max_tokens=max_tokens,
-                    presence_penalty=presence_penalty,
-                    frequency_penalty=frequency_penalty,
-                    repeat_penalty=repeat_penalty,
-                    tfs_z=tfs_z,
-                    mirostat_mode=mirostat_mode,
-                    mirostat_tau=mirostat_tau,
-                    mirostat_eta=mirostat_eta,
-                    model=model,
-                    logits_processor=logits_processor,
-                    stopping_criteria=stopping_criteria,
-                    grammar=tool_grammar,  # Use tool call grammar
-                    logit_bias=logit_bias,
-                )
-                
-                # Combine the completions
-                completion_or_chunks = {
-                    **completion,
-                    "choices": [{
-                        **completion["choices"][0],
-                        "text": response_text + tool_completion["choices"][0]["text"]
-                    }]
-                }
-            
-        if tool is not None:
-            tool_name = tool["function"]["name"]
-            return _convert_completion_to_chat_function(
-                tool_name, completion_or_chunks, stream
+            # STREAMING PATH
+            yield from _handle_streaming_completion(
+                prompt, stop, stopping_criteria, grammar, tool, tool_choice, tools,
+                llama, base_completion_kwargs
             )
-
-        # Handle auto tool choice - parse response for function calls (like thinking tags)
-        if tool_choice == "auto" and tools is not None and len(tools) > 0:
-            # Only handle non-streaming for now (streaming tool calls need different approach)
-            if not stream:
-                completion_result = cast(llama_types.CreateCompletionResponse, completion_or_chunks)
-                response_text = completion_result["choices"][0]["text"]
-
-                if llama.verbose:
-                    print(f"[DEBUG] Auto tool choice triggered. Response text: {response_text[:200]}...", file=sys.stderr)
-                    print("[DEBUG] Looking for tool_call tags...", file=sys.stderr)
-
-                # Parse the response similar to how template handles <think></think> and <tool_call></tool_call>
-                message_content = response_text
-                tool_call_json = None
-
-                # Look for <tool_call> tags in the response
-                tool_call_start_idx = response_text.find("<tool_call>")
-                if tool_call_start_idx >= 0 and "</tool_call>" in response_text:
-                    if llama.verbose:
-                        print("[DEBUG] Found tool_call tags, attempting to parse", file=sys.stderr)
-                    try:
-                        # Extract content between <tool_call> tags (like template does)
-                        tool_call_start = tool_call_start_idx + len("<tool_call>")
-                        tool_call_end = response_text.find("</tool_call>")
-                        
-                        # Switch to grammar strict mode for tool call content
-                        if tool_call_start_idx > 0:
-                            # Get content before tool call tag
-                            pre_tool_call = response_text[:tool_call_start_idx].strip()
-                            if pre_tool_call:
-                                # Store pre-tool call content
-                                message_content = pre_tool_call
-
-                        if tool_call_start >= 0 and tool_call_end > tool_call_start:
-                            # Switch to grammar strict mode for tool call content
-                            tool_call_content = response_text[tool_call_start:tool_call_end].strip()
-                            if llama.verbose:
-                                print(f"[DEBUG] Extracted tool_call content: {tool_call_content}", file=sys.stderr)
-                                print("[DEBUG] Switching to grammar strict mode for tool call", file=sys.stderr)
-                            
-                            # Create JSON grammar for tool calls
-                            tool_call_schema = {
-                                "type": "object",
-                                "required": ["type", "name", "input"],
-                                "properties": {
-                                    "type": {"type": "string", "enum": ["tool_use"]},
-                                    "name": {"type": "string"},
-                                    "input": {"type": "object"}
-                                }
-                            }
-                            
-                            # Create grammar for tool call JSON
-                            try:
-                                grammar = llama_grammar.LlamaGrammar.from_json_schema(
-                                    json.dumps(tool_call_schema), 
-                                    verbose=llama.verbose
-                                )
-                            except Exception as e:
-                                if llama.verbose:
-                                    print(f"[DEBUG] Failed to create tool call grammar: {e}", file=sys.stderr)
-                                grammar = None
-                                
-                            parsed_json = json.loads(tool_call_content)
-
-                            # Check if it's a valid tool call
-                            if (parsed_json.get("type") == "tool_use" and
-                                "name" in parsed_json and
-                                "input" in parsed_json):
-
-                                if llama.verbose:
-                                    print(f"[DEBUG] Valid tool call found: {parsed_json.get('name')}", file=sys.stderr)
-                                tool_call_json = parsed_json
-                                # Extract message content before the <tool_call> tag
-                                message_content = response_text[:response_text.find("<tool_call>")].strip()
-
-                    except json.JSONDecodeError as e:
-                        # Not valid JSON, treat as pure message
-                        if llama.verbose:
-                            print(f"[DEBUG] Tool call JSON parsing failed: {e}. JSON text: {tool_call_content[:200]}...", file=sys.stderr)
-                        pass
-                else:
-                    if llama.verbose:
-                        has_start = "<tool_call>" in response_text
-                        has_end = "</tool_call>" in response_text
-                        print(f"[DEBUG] Tool call tags not found. Has start tag: {has_start}, Has end tag: {has_end}", file=sys.stderr)
-
-                if llama.verbose:
-                    print(f"[DEBUG] Final tool_call_json: {tool_call_json is not None}", file=sys.stderr)
-
-                # If we found a valid tool call, build the response
-                if tool_call_json:
-                    if llama.verbose:
-                        print(f"[DEBUG] Building tool call response for {tool_call_json['name']}", file=sys.stderr)
-                    tool_name = tool_call_json["name"]
-                    tool_input = tool_call_json["input"]
-                    tool_id = "call_0_" + tool_name + "_" + completion_result["id"]
-
-                    return {
-                        "id": "chat" + completion_result["id"],
-                        "object": "chat.completion",
-                        "created": completion_result["created"],
-                        "model": completion_result["model"],
-                        "choices": [{
-                            "index": 0,
-                            "message": {
-                                "role": "assistant",
-                                "content": message_content if message_content else None,
-                                "tool_calls": [{
-                                    "id": tool_id,
-                                    "type": "function",
-                                    "function": {
-                                        "name": tool_name,
-                                        "arguments": json.dumps(tool_input),
-                                    },
-                                }],
-                            },
-                            "logprobs": _convert_text_completion_logprobs_to_chat(
-                                completion_result["choices"][0]["logprobs"]
-                            ),
-                            "finish_reason": "tool_calls",
-                        }],
-                        "usage": completion_result["usage"],
-                    }
-
-        return _convert_completion_to_chat(completion_or_chunks, stream=stream)
+        else:
+            # NON-STREAMING PATH
+            return _handle_non_streaming_completion(
+                prompt, stop, stopping_criteria, grammar, tool, tool_choice, tools,
+                llama, base_completion_kwargs
+            )
 
     return chat_completion_handler
 
