@@ -422,15 +422,29 @@ def _handle_streaming_tool_calls(
         text = chunk["choices"][0]["text"]
         accumulated_text += text
         stop_reason = chunk["choices"][0]["finish_reason"]
-        if stop_reason == "stop:<tool_call>":
-            accumulated_text += "<tool_call>"
+
+        # Debug: Print accumulated text when we get a stop reason
+        if stop_reason and llama.verbose:
+            print(f"[DEBUG] Stop reason: {stop_reason}, Accumulated text: '{accumulated_text}'", file=sys.stderr)
+
+        # Check if we hit a tool call stop or if tool call is in the accumulated text
+        # Also handle case where complete tool call is already generated
+        if (stop_reason == "stop:<tool_call>" or
+            (stop_reason and "<tool_call>" in accumulated_text and
+             (stop_reason == "stop" or "</tool_call>" not in accumulated_text))):
+
+            if stop_reason == "stop:<tool_call>":
+                accumulated_text += "<tool_call>"
+
             # Found tool call, switch to grammar mode
-            print("[DEBUG TOOLS] Found tool call, switching to grammar mode", file=sys.stderr)
+            print(f"[DEBUG TOOLS] Found tool call, switching to grammar mode. Stop reason: {stop_reason}", file=sys.stderr)
+            print(f"[DEBUG TOOLS] Accumulated text: '{accumulated_text}'", file=sys.stderr)
             
             # First generate the tool name with grammar
-            function_names = " | ".join([f'''"functions.{t["function"]["name"]}"''' for t in tools]) if tools else ""
+            # Since we already have <tool_call>, we just need the function name and colon
+            function_names = " | ".join([f'''"functions.{t["function"]["name"]}:"''' for t in tools]) if tools else ""
             tool_call_gbnf = (
-                'root ::= functions\n'  # We already have <tool_call>, just need the function name
+                'root ::= "\\n" functions\n'  # We already have <tool_call>, add newline then function name
                 f"functions ::= {function_names}\n"
             )
             
@@ -442,14 +456,17 @@ def _handle_streaming_tool_calls(
                 )
                 
                 # Generate the tool name (non-streaming for simpler handling)
+                # Create a new prompt that includes the accumulated text
+                combined_prompt = prompt + llama.tokenize((accumulated_text + "\n").encode("utf-8"), add_bos=False, special=True)
                 name_completion = llama.create_completion(
-                    prompt=prompt + llama.tokenize((accumulated_text + "\n").encode("utf-8"), add_bos=False, special=True),
+                    prompt=combined_prompt,
                     grammar=name_grammar,
                     stream=False,
-                    stop=[":"],  # Stop at the colon after function name
+                    stop=[],  # Grammar will handle the format including colon
                     **{k: v for k, v in base_completion_kwargs.items() if k != "stream" and k != "grammar"}
                 )
                 name_text = name_completion["choices"][0]["text"]
+                tool_name = name_text.split(".")[-1].rstrip(":")
                 # Convert to chat completion chunk and yield
                 yield {
                     "id": "chat" + name_completion["id"],
@@ -463,10 +480,10 @@ def _handle_streaming_tool_calls(
                             "content": None,
                             "tool_calls": [{
                                 "index": 0,
-                                "id": "call_0_" + name_text.split(".")[-1] + "_" + name_completion["id"],
+                                "id": "call_0_" + tool_name + "_" + name_completion["id"],
                                 "type": "function",
                                 "function": {
-                                    "name": name_text.split(".")[-1],
+                                    "name": tool_name,
                                     "arguments": ""
                                 }
                             }]
@@ -474,48 +491,68 @@ def _handle_streaming_tool_calls(
                         "finish_reason": None
                     }]
                 }
-                accumulated_text += name_text + ":"  # Add the colon back since we stopped before it
-                
-                # Get the selected tool from the accumulated text
-                tool_name = accumulated_text.split("\n")[-1].split("functions.")[-1].split(":")[0]
+                accumulated_text += name_text  # name_text already includes the colon from grammar
+
+                # Get the selected tool from the name_text (remove newline, functions. prefix, and colon)
                 tool = next((t for t in tools if t["function"]["name"] == tool_name), None)
-                
+
+                print(f"[DEBUG] Generated name_text: '{name_text}'", file=sys.stderr)
+                print(f"[DEBUG] Extracted tool_name: '{tool_name}'", file=sys.stderr)
+                print(f"[DEBUG] Found tool: {tool is not None}", file=sys.stderr)
+
                 if tool:
                     # Get tool parameters grammar
                     tool_grammar = _grammar_for_tool_parameters(tool, verbose=llama.verbose)
-                    
+
+                    print(f"[DEBUG] Starting parameter generation for tool: {tool['function']['name']}", file=sys.stderr)
+                    print(f"[DEBUG] Accumulated text: '{accumulated_text}'", file=sys.stderr)
+
+                    # Create prompt for parameter generation (include function name and colon, then newline for JSON)
+                    param_prompt = prompt + llama.tokenize((accumulated_text + "\n").encode("utf-8"), add_bos=False, special=True)
+
+                    param_text = ""
                     # Stream the tool parameters
                     for param_chunk in llama.create_completion(
-                        prompt=prompt + llama.tokenize((accumulated_text + "\n").encode("utf-8"), add_bos=False, special=True),
+                        prompt=param_prompt,
                         grammar=tool_grammar,
                         stream=True,
-                        stop=["</tool_call>"],
+                        stop=["}"],
                         **{k: v for k, v in base_completion_kwargs.items() if k != "stream" and k != "grammar"}
                     ):
+                        param_text = param_chunk["choices"][0]["text"]
+                        if param_text:
+                            print(f"[DEBUG] Parameter chunk: '{param_text}'", file=sys.stderr)
+
                         # Convert to chat completion chunk and yield
                         yield {
-                            "id": "chat" + param_chunk["id"],
+                            "id": "chat" + name_completion["id"],
                             "object": "chat.completion.chunk",
-                            "created": param_chunk["created"],
-                            "model": param_chunk["model"],
+                            "created": name_completion["created"],
+                            "model": name_completion["model"],
                             "choices": [{
                                 "index": 0,
                                 "delta": {
+                                    "role": "assistant",
+                                    "content": None,
                                     "tool_calls": [{
                                         "index": 0,
+                                        "id": "call_0_" + tool_name + "_" + name_completion["id"],
+                                        "type": "function",
                                         "function": {
-                                            "arguments": param_chunk["choices"][0]["text"]
+                                            "name": tool_name,
+                                            "arguments": param_text
                                         }
                                     }]
                                 },
                                 "finish_reason": None
                             }]
                         }
-                        accumulated_text += param_chunk["choices"][0]["text"]
+                        accumulated_text += param_text
                     
-                    # After tool call, continue normal streaming
+                    # After tool call, continue normal streaming from where we left off
+                    continue_prompt = prompt + llama.tokenize(accumulated_text.encode("utf-8"), add_bos=False, special=True)
                     for chunk in llama.create_completion(
-                        prompt=prompt + accumulated_text,
+                        prompt=continue_prompt,
                         stream=True,
                         **{k: v for k, v in base_completion_kwargs.items() if k != "stream"}
                     ):
@@ -525,8 +562,9 @@ def _handle_streaming_tool_calls(
                 if llama.verbose:
                     print(f"[DEBUG] Failed to stream tool call: {e}", file=sys.stderr)
                 # Fall back to regular streaming without grammar
+                fallback_prompt = prompt + llama.tokenize(accumulated_text.encode("utf-8"), add_bos=False, special=True)
                 for chunk in llama.create_completion(
-                    prompt=prompt + llama.tokenize(accumulated_text.encode("utf-8"), add_bos=False, special=True),
+                    prompt=fallback_prompt,
                     stream=True,
                     **{k: v for k, v in base_completion_kwargs.items() if k != "stream"}
                 ):
