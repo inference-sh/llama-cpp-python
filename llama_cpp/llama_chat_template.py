@@ -536,7 +536,7 @@ def _handle_streaming_tool_calls(
             # Keep streaming normally until we find a tool call
             yield from _convert_text_completion_chunks_to_chat(iter([chunk]))
 
-
+# TODO: Non streaming might not work as expected yet, we need to test it
 def _handle_non_streaming_tool_calls(
     completion: llama_types.CreateCompletionResponse,
     tools: List[llama_types.ChatCompletionTool],
