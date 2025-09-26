@@ -513,15 +513,30 @@ def _handle_streaming_tool_calls(
 
                     # After completing the tool call parameters, continue with more completions
                     # Recursively handle the next completion by starting a new generation
-                    yield from _handle_streaming_tool_calls(
-                        tools,
-                        prompt + llama.tokenize((accumulated_text + "\n</tool_call>\n").encode("utf-8"), add_bos=False, special=True),
-                        llama,
-                        base_completion_kwargs,
-                        stopping_criteria=stopping_criteria,
-                        grammar=grammar,
-                        tool_call_index=tool_call_index + 1  # Increment index for potential next tool call
-                    )
+                    # yield from _handle_streaming_tool_calls(
+                    #     tools,
+                    #     prompt + llama.tokenize((accumulated_text + "\n</tool_call>\n").encode("utf-8"), add_bos=False, special=True),
+                    #     llama,
+                    #     base_completion_kwargs,
+                    #     stopping_criteria=stopping_criteria,
+                    #     grammar=grammar,
+                    #     tool_call_index=tool_call_index + 1  # Increment index for potential next tool call
+                    # )
+                       # Commented out recursive tool calling
+                    # After completing the tool call parameters, we stop here
+                    # Instead of recursively calling for more tool calls, we end normally
+                    # Generate a finish_reason chunk to indicate completion
+                    yield {
+                        "id": "chat" + name_completion["id"],
+                        "object": "chat.completion.chunk",
+                        "created": name_completion["created"],
+                        "model": name_completion["model"],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop"
+                        }]
+                    }
             except Exception as e:
                 # Fall back to regular streaming without grammar
                 fallback_prompt = prompt + llama.tokenize(accumulated_text.encode("utf-8"), add_bos=False, special=True)
