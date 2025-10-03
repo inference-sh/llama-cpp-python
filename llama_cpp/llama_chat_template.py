@@ -227,6 +227,8 @@ class Jinja2ChatFormatter(ChatFormatter):
             tool_choice=tool_choice,
             strftime_now=self.strftime_now,
         )
+        
+        print(prompt)
 
         stopping_criteria = None
         if self.stop_token_ids is not None:
