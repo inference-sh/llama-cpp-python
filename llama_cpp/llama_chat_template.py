@@ -406,11 +406,15 @@ def _handle_streaming_tool_calls(
     accumulated_text = ""
     for chunk in completion_chunks:
         text = chunk["choices"][0]["text"]
+        print("TEXT", text)
         accumulated_text += text
         stop_reason = chunk["choices"][0]["finish_reason"]
 
+        print("STOP REASON", stop_reason)
+
         # Check if we hit a tool call
         if (stop_reason == "stop:<tool_call>"):
+            print("TOOL CALL FOUND")
 
             accumulated_text += "<tool_call>"
             
