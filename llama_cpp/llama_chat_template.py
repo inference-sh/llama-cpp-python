@@ -228,7 +228,9 @@ class Jinja2ChatFormatter(ChatFormatter):
             strftime_now=self.strftime_now,
         )
         
+        print("JINJA2 PROMPT")
         print(prompt)
+        print("JINJA2 PROMPT END")
 
         stopping_criteria = None
         if self.stop_token_ids is not None:
@@ -891,6 +893,7 @@ def chat_formatter_to_chat_completion_handler(
         }
 
         # Format the prompt using the chat formatter
+        print("FORMATTING PROMPT")
         result = chat_formatter(
             messages=messages,
             functions=functions,
@@ -900,6 +903,7 @@ def chat_formatter_to_chat_completion_handler(
         )
 
         # Prepare prompt and stopping criteria
+        print("TOKENIZING PROMPT")
         prompt = llama.tokenize(
             result.prompt.encode("utf-8"),
             add_bos=not result.added_special,
