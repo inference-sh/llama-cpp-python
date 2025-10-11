@@ -545,6 +545,7 @@ def _handle_streaming_tool_calls(
                         }]
                     }
             except Exception as e:
+                print("ERROR", e)
                 # Fall back to regular streaming without grammar
                 fallback_prompt = prompt + llama.tokenize(accumulated_text.encode("utf-8"), add_bos=False, special=True)
                 for chunk in llama.create_completion(
