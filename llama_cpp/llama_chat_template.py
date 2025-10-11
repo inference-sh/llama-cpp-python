@@ -406,15 +406,11 @@ def _handle_streaming_tool_calls(
     accumulated_text = ""
     for chunk in completion_chunks:
         text = chunk["choices"][0]["text"]
-        print("TEXT", text)
         accumulated_text += text
         stop_reason = chunk["choices"][0]["finish_reason"]
 
-        print("STOP REASON", stop_reason)
-
         # Check if we hit a tool call
         if (stop_reason == "stop:<tool_call>"):
-            print("TOOL CALL FOUND")
 
             accumulated_text += "<tool_call>"
             
@@ -439,7 +435,7 @@ def _handle_streaming_tool_calls(
                 name_completion = llama.create_completion(
                     prompt=combined_prompt,
                     grammar=name_grammar,
-                    temperature=0,
+                    temperature=0.0,
                     stream=False,
                     stop=[],  # Grammar will handle the format including colon
                     **{k: v for k, v in base_completion_kwargs.items() if k != "stream" and k != "grammar"}
@@ -545,7 +541,6 @@ def _handle_streaming_tool_calls(
                         }]
                     }
             except Exception as e:
-                print("ERROR", e)
                 # Fall back to regular streaming without grammar
                 fallback_prompt = prompt + llama.tokenize(accumulated_text.encode("utf-8"), add_bos=False, special=True)
                 for chunk in llama.create_completion(
