@@ -438,7 +438,7 @@ def _handle_streaming_tool_calls(
                     temperature=0.0,
                     stream=False,
                     stop=[],  # Grammar will handle the format including colon
-                    **{k: v for k, v in base_completion_kwargs.items() if k != "stream" and k != "grammar"}
+                    **{k: v for k, v in base_completion_kwargs.items() if k != "stream" and k != "grammar" and k != "temperature"}
                 )
                 name_text = name_completion["choices"][0]["text"]
                 tool_name = name_text.split(".")[-1].rstrip(":")
