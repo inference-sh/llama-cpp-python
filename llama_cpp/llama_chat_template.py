@@ -228,9 +228,7 @@ class Jinja2ChatFormatter(ChatFormatter):
             strftime_now=self.strftime_now,
         )
         
-        print("JINJA2 PROMPT")
         print(prompt)
-        print("JINJA2 PROMPT END")
 
         stopping_criteria = None
         if self.stop_token_ids is not None:
@@ -437,6 +435,7 @@ def _handle_streaming_tool_calls(
                 name_completion = llama.create_completion(
                     prompt=combined_prompt,
                     grammar=name_grammar,
+                    temperature=0,
                     stream=False,
                     stop=[],  # Grammar will handle the format including colon
                     **{k: v for k, v in base_completion_kwargs.items() if k != "stream" and k != "grammar"}
@@ -893,7 +892,6 @@ def chat_formatter_to_chat_completion_handler(
         }
 
         # Format the prompt using the chat formatter
-        print("FORMATTING PROMPT")
         result = chat_formatter(
             messages=messages,
             functions=functions,
@@ -903,7 +901,6 @@ def chat_formatter_to_chat_completion_handler(
         )
 
         # Prepare prompt and stopping criteria
-        print("TOKENIZING PROMPT")
         prompt = llama.tokenize(
             result.prompt.encode("utf-8"),
             add_bos=not result.added_special,
